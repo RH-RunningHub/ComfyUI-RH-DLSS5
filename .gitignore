@@ -1,0 +1,38 @@
+# 敏感文件 / Sensitive files
+config.json
+.env
+*.pem
+*.key
+sync.sh
+deploy.sh
+cptorh*.sh
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+*.egg-info/
+
+# Node.js
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 大文件 / Large files
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+models/
+weights/
+save_audio/
+
+# Logs
+*.log
+*.tmp

@@ -1,0 +1,49 @@
+{
+  "1": {
+    "class_type": "RH_DLSS5Enhance",
+    "inputs": {
+      "video": ["2", 0],
+      "upscaling_mode": "1.5x (Quality)",
+      "style": "default",
+      "preset": 0,
+      "intensity": 1.0,
+      "tone": 1.0,
+      "structure": 1.5,
+      "skin": 2.0,
+      "auto_mask": "on",
+      "motion": "auto",
+      "scene_change_threshold": 0.24,
+      "batch_mode": "temporal sequence",
+      "warmup_frames": 0,
+      "keep_audio": "on",
+      "backend": "auto",
+      "channel_order": "auto",
+      "runtime_dir": "",
+      "wine_prefix": ""
+    },
+    "_meta": {
+      "title": "DLSS5 Enhance (video, 1.5x Quality)"
+    }
+  },
+  "2": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "example.mp4"
+    },
+    "_meta": {
+      "title": "LoadVideo (needs a recent ComfyUI build; replace example.mp4 with your clip)"
+    }
+  },
+  "3": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": ["1", 1],
+      "filename_prefix": "dlss5_enhanced_video",
+      "format": "auto",
+      "codec": "auto"
+    },
+    "_meta": {
+      "title": "SaveVideo (needs a recent ComfyUI build)"
+    }
+  }
+}

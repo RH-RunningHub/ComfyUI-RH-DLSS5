@@ -1,0 +1,38 @@
+{
+  "1": {
+    "class_type": "RH_DLSS5Enhance",
+    "inputs": {
+      "image": ["2", 0],
+      "upscaling_mode": "1x (DLAA / native)",
+      "style": "default",
+      "preset": 0,
+      "intensity": 1.0,
+      "tone": 1.0,
+      "structure": 1.5,
+      "skin": 2.0,
+      "auto_mask": "on",
+      "motion": "auto",
+      "scene_change_threshold": 0.24,
+      "batch_mode": "still images",
+      "warmup_frames": 0,
+      "keep_audio": "on",
+      "backend": "auto",
+      "channel_order": "auto",
+      "runtime_dir": "",
+      "wine_prefix": ""
+    }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    }
+  },
+  "3": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["1", 0],
+      "filename_prefix": "dlss5_enhanced"
+    }
+  }
+}

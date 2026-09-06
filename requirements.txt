@@ -1,0 +1,4 @@
+numpy
+# Optional extras (not installed automatically):
+#   opencv-python (or opencv-contrib-python) enables optical-flow motion guides
+#   av (PyAV) + imageio-ffmpeg are used for the video fallback path on old ComfyUI builds
