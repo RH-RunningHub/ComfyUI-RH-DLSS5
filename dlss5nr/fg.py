@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import struct
 import subprocess
 import threading
@@ -143,7 +144,7 @@ def probe_fg_capabilities(runtime: Path) -> dict:
 
     env = _worker_env(runtime)
     proc = subprocess.Popen(
-        [str(find_wine()), str(runtime / WORKER_NAME), "--probe"],
+        _worker_command(runtime, "--probe"),
         cwd=str(runtime), env=env,
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=True, text=True, encoding="utf-8", errors="replace",
@@ -185,8 +186,18 @@ class _StderrDrain(threading.Thread):
         return "\n".join(list(self.lines)[-count:])
 
 
+def _worker_command(runtime: Path, *args: str) -> list[str]:
+    """Worker launch line: the D3D12 host runs natively on Windows, via Wine elsewhere."""
+    worker = str(runtime / WORKER_NAME)
+    if platform.system() == "Windows":
+        return [worker, *args]
+    return [str(find_wine()), worker, *args]
+
+
 def _worker_env(runtime: Path) -> dict:
     env = os.environ.copy()
+    if platform.system() == "Windows":
+        return env
     env.setdefault("WINEDEBUG", "-all")
     env.setdefault("DXVK_ENABLE_NVAPI", "1")
     env.setdefault("WINEDLLOVERRIDES", "d3d12,d3d12core,nvapi64,dxgi=n,b")
@@ -212,7 +223,7 @@ class FGSession:
             env["WINEPREFIX"] = str(wine_prefix)
         try:
             self.proc = subprocess.Popen(
-                [str(find_wine()), str(runtime / WORKER_NAME), "--serve"],
+                _worker_command(runtime, "--serve"),
                 cwd=str(runtime), env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True,
