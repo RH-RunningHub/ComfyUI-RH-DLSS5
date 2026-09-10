@@ -16,6 +16,7 @@ import ctypes
 import ctypes.util
 import glob
 import os
+import platform
 from ctypes import (
     CFUNCTYPE,
     POINTER,
@@ -162,7 +163,8 @@ class NV_OF_CUDA_BUFFER_STRIDE_INFO(Structure):
 
 def _load_nvof_library() -> ctypes.CDLL:
     errors = []
-    for name in ("libnvidia-opticalflow.so.1",):
+    names = ("nvofapi64.dll",) if platform.system() == "Windows" else ("libnvidia-opticalflow.so.1",)
+    for name in names:
         try:
             return ctypes.CDLL(name)
         except OSError as exc:
@@ -187,7 +189,10 @@ def _load_cudart() -> ctypes.CDLL:
     bound to the same primary context is the working route.
     """
     errors = []
-    for name in ("libcudart.so.12", "libcudart.so.11.0", "libcudart.so"):
+    names = (("cudart64_13.dll", "cudart64_12.dll", "cudart64_110.dll")
+             if platform.system() == "Windows"
+             else ("libcudart.so.12", "libcudart.so.11.0", "libcudart.so"))
+    for name in names:
         try:
             return ctypes.CDLL(name)
         except OSError as exc:
@@ -302,7 +307,7 @@ class NvofGuideGenerator:
 
         # Only a query is needed from the driver handle: the NVOF library wants
         # the context handle and does its own resource work through libnvcuvid.
-        cuda = ctypes.CDLL("libcuda.so.1")
+        cuda = ctypes.CDLL("nvcuda.dll" if platform.system() == "Windows" else "libcuda.so.1")
         cuda.cuCtxGetCurrent.argtypes = [POINTER(c_void_p)]
         cuda.cuCtxGetCurrent.restype = c_int
         ctx = c_void_p()
