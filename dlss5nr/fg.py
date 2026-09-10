@@ -326,7 +326,14 @@ def _guide_generator(width: int, height: int, motion_mode: str, threshold: float
         try:
             from .nvof import NvofGuideGenerator
 
-            return NvofGuideGenerator(width, height, threshold), "nvof"
+            guide = NvofGuideGenerator(width, height, threshold)
+            # "nvof" is documented as hardware-only, so it keeps the generator
+            # even when setup failed (zero motion); "auto" must fall back or it
+            # would silently emit nothing but duplicated frames.
+            if guide.available or motion_mode == "nvof":
+                return guide, "nvof"
+            print(f"[RH-DLSS5] nvof unavailable ({guide.init_error}); "
+                  "falling back to DIS optical flow", flush=True)
         except Exception:
             if motion_mode == "nvof":
                 raise
