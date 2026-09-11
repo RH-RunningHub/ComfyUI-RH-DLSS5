@@ -209,7 +209,8 @@ Notes:
 | --- | --- |
 | `DLSS5_RUNTIME_DIR` | Runtime folder override (`RH_DLSS5Enhance`) |
 | `DLSS5_FG_RUNTIME_DIR` | Frame-generation runtime folder override (`RH_DLSS5FrameInterpolation`) |
-| `DLSS5_GPU_INDEX` | NVIDIA adapter index for the worker (default 0). Deliberately an environment variable, not a widget: on a queue platform each worker is pinned to one GPU, and a per-task widget value would disagree with the scheduling |
+| `DLSS5_GPU_INDEX` | Manual NVIDIA adapter index (DXGI enumeration order, default 0), escape hatch only. By default the plugin resolves `CUDA_VISIBLE_DEVICES` and pins the Wine children to the scheduler-assigned card (DXGI/Vulkan ignore CVD; unhandled, a multi-GPU host would land on another worker's GPU). When the card's UUID resolves, `DXVK_FILTER_DEVICE_UUID` locks it exactly |
+| `DLSS5_WINEPREFIX` | Wine prefix override (Linux). Empty uses `~/.wine`; validated at run time — the prefix must have DXVK + DXVK-NVAPI installed (d3d12.dll and nvapi64.dll under system32), with a wineboot bootstrap attempt and an actionable error otherwise |
 | `DLSS5NR_SNR_FILENAME` | Plain file name of an alternative `nvngx_dlssnr*.dll` in the runtime folder (auto-selection override) |
 | `DLSS5_WINE` | Wine binary override (Linux) |
 | `DLSS5_WINEPREFIX` / `WINEPREFIX` | Wine prefix for the worker |

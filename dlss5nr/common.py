@@ -193,6 +193,111 @@ def detect_gpu_capability(gpu_index: int = 0) -> tuple[int, int] | None:
         return None
 
 
+def _normalize_uuid_hex(raw: str) -> str | None:
+    """'GPU-12345678-abcd-...' -> 32-char lowercase hex, DXVK's rendered form."""
+    hexed = str(raw).strip().removeprefix("GPU-").replace("-", "").lower()
+    if len(hexed) == 32 and all(c in "0123456789abcdef" for c in hexed):
+        return hexed
+    return None
+
+
+def _gpu_uuid_table() -> dict[int, str | None]:
+    """ordinal -> uuid_hex, from nvidia-smi (index space, no pynvml dependency)."""
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return {}
+    table = {}
+    for line in out.stdout.strip().splitlines():
+        if "," not in line:
+            continue
+        index, raw = line.split(",", 1)
+        try:
+            i = int(index.strip())
+        except ValueError:
+            continue
+        table[i] = _normalize_uuid_hex(raw)
+    return table
+
+
+_pinned_gpu_cache: tuple[str | None, int | None] | None | bool = False
+
+
+def resolve_pinned_gpu() -> tuple[str | None, int | None] | None:
+    """Resolve the GPU the queue scheduler pinned this worker to, or None.
+
+    CUDA_VISIBLE_DEVICES pins the ComfyUI worker in the CUDA view only. Wine
+    children enumerate GPUs through DXGI/Vulkan, which ignores that variable
+    entirely - left alone, dlss5nr_host.exe and dlssg-worker.exe would land on
+    NVIDIA adapter 0, i.e. another worker's card on multi-GPU hosts.
+
+    Returns (uuid_hex_32, physical_ordinal). The first CVD entry decides:
+    numeric entries map straight to the physical ordinal (NVML index space,
+    which matches the CUDA view on the homogeneous hosts this fleet runs) and
+    'GPU-<uuid>' entries carry the identity directly. Results are cached for
+    the process lifetime; the environment cannot change mid-run.
+    """
+    global _pinned_gpu_cache
+    if _pinned_gpu_cache is not False:
+        return _pinned_gpu_cache
+    _pinned_gpu_cache = None
+    entries = [e.strip() for e in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+               if e.strip() and e.strip() != "-1"]
+    if not entries:
+        return None
+    table = _gpu_uuid_table()
+    first = entries[0]
+    uuid_hex = ordinal = None
+    if first.upper().startswith("GPU-"):
+        uuid_hex = _normalize_uuid_hex(first)
+        if uuid_hex is not None:
+            for idx, uid in table.items():
+                if uid == uuid_hex:
+                    ordinal = idx
+                    break
+    elif first.isdigit():
+        ordinal = int(first)
+        uuid_hex = table.get(ordinal)
+    if uuid_hex is None and ordinal is None:
+        return None
+    _pinned_gpu_cache = (uuid_hex, ordinal)
+    return _pinned_gpu_cache
+
+
+def apply_gpu_pin(env: dict) -> None:
+    """Pin wine/DXGI children to the scheduler-pinned GPU.
+
+    Precedence: explicit DLSS5_GPU_INDEX (DXGI NVIDIA adapter ordinal, the
+    manual escape hatch) > CUDA_VISIBLE_DEVICES auto-pin > adapter 0.
+    With a resolved UUID we filter at the DXVK layer: DXVK then exposes
+    exactly one NVIDIA adapter, so the bridge's ordinal must be 0 and both
+    the NR host and the FG worker become order-independent. Without a UUID
+    we fall back to the physical ordinal (correct as long as DXGI and NVML
+    enumerate in the same order, which holds on single-vendor hosts).
+    """
+    explicit = os.environ.get("DLSS5_GPU_INDEX", "").strip()
+    if explicit:
+        try:
+            env["DLSS5NR_GPU_INDEX"] = str(int(explicit) or 0)
+        except ValueError:
+            pass
+        return
+    pin = resolve_pinned_gpu()
+    if pin is None:
+        env.setdefault("DLSS5NR_GPU_INDEX", "0")
+        return
+    uuid_hex, ordinal = pin
+    if uuid_hex:
+        env["DXVK_FILTER_DEVICE_UUID"] = uuid_hex
+        env["DLSS5NR_GPU_INDEX"] = "0"
+    elif ordinal is not None:
+        env["DLSS5NR_GPU_INDEX"] = str(ordinal)
+
+
 def resolve_snr_filename(runtime: Path, gpu_index: int = 0) -> str:
     """Pick the DLSSNR runtime DLL file name to load from `runtime`.
 
@@ -224,8 +329,17 @@ def _ensure_caller_shim(runtime: Path) -> None:
     the three NVIDIA DLLs), link the bundled shim in (copy as fallback)."""
     bundled = PLUGIN_ROOT / "runtime" / "caller"
     target = runtime / "caller"
-    if target.exists() or target.is_symlink():
-        return
+    if target.exists():
+        return                       # real dir/file already present
+    if target.is_symlink():
+        # A dangling symlink (e.g. an absolute link to a previous plugin
+        # runtime/caller that was moved on upgrade) would otherwise make
+        # check_runtime_files report the shipped shim as missing. Drop it so
+        # we re-link to the currently bundled shim.
+        try:
+            target.unlink()
+        except OSError:
+            return
     if not (bundled / "nvngx.dll_comfy.dll").is_file():
         return
     try:

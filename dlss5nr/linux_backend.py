@@ -144,12 +144,47 @@ def _start_xvfb_if_needed(env: dict):
 atexit.register(_terminate_shared_xvfb)
 
 
+def _prefix_ok(prefix: Path) -> bool:
+    """Usable for NGX: DXVK + DXVK-NVAPI must be installed into the prefix."""
+    sys32 = prefix / "drive_c" / "windows" / "system32"
+    return (sys32 / "d3d12.dll").is_file() and (sys32 / "nvapi64.dll").is_file()
+
+
+def resolve_wine_prefix(explicit: str = "", log=print) -> str:
+    """WINEPREFIX for the wine host, validated (and bootstrapped) at call time.
+
+    The prefix must carry DXVK + DXVK-NVAPI (d3d12.dll / nvapi64.dll under
+    system32); a bare wineboot prefix fails NGX with errors that point nowhere
+    near the real cause, so validate and name exactly what is missing. This is
+    re-resolved on every call and never cached at import time: container
+    rebuilds wipe /root, and import-time caching would freeze a stale path
+    (same trap the Astra pipeline documents).
+    """
+    candidate = Path(explicit or os.environ.get("DLSS5_WINEPREFIX", "") or (Path.home() / ".wine"))
+    if not candidate.exists():
+        log(f"[RH-DLSS5] wine prefix {candidate} missing; running wineboot to create it")
+        boot_env = os.environ.copy()
+        boot_env["WINEDEBUG"] = "-all"
+        boot_env.pop("LD_LIBRARY_PATH", None)
+        try:
+            subprocess.run([find_wine(), "wineboot", "-u"],
+                           env={**boot_env, "WINEPREFIX": str(candidate)},
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=240)
+        except Exception as exc:
+            raise DLSS5Error(f"Could not create wine prefix {candidate}: {exc}") from exc
+    if not _prefix_ok(candidate):
+        raise DLSS5Error(
+            f"wine prefix {candidate} is not usable for DLSS5: it needs DXVK + DXVK-NVAPI "
+            "(d3d12.dll and nvapi64.dll under drive_c/windows/system32). Point DLSS5_WINEPREFIX "
+            "(or the wine_prefix widget) at a prefix with DXVK + dxvk-nvapi installed.")
+    return str(candidate)
+
+
 def _host_command(host: Path, runtime: Path, gpu_index: int, wine_prefix: str = "",
                   hdr: bool = False) -> tuple[list[str], dict]:
     wine = find_wine()
     env = os.environ.copy()
     env.setdefault("DLSS5NR_DISABLE_OTHER_SINKS", "1")
-    env["DLSS5NR_GPU_INDEX"] = str(int(gpu_index))
     # The bridge reads this at carrier-feature creation: AutoExposure is always
     # on, IsHDR follows linear-light feeding (see dlss5nr_bridge.cpp).
     env["DLSS5NR_HDR"] = "1" if hdr else "0"
@@ -165,8 +200,13 @@ def _host_command(host: Path, runtime: Path, gpu_index: int, wine_prefix: str = 
     # reach it (some launch configurations send their logs to stdout).
     env.setdefault("DXVK_LOG_LEVEL", "none")
     env.setdefault("VKD3D_DEBUG", "none")
-    if wine_prefix:
-        env["WINEPREFIX"] = str(wine_prefix)
+    # The worker's LD_LIBRARY_PATH (e.g. /usr/local/cuda-12.8/lib64) is known
+    # to break wine-side NVIDIA shims (Astra A/B: stripping it fixed cuInit).
+    env.pop("LD_LIBRARY_PATH", None)
+    # CUDA_VISIBLE_DEVICES does not reach DXGI; resolve the scheduler's pin
+    # here so the host lands on this worker's own card (see common.apply_gpu_pin).
+    common.apply_gpu_pin(env)
+    env["WINEPREFIX"] = resolve_wine_prefix(wine_prefix)
 
     cmd = [wine, str(host), str(runtime)]
     return cmd, env

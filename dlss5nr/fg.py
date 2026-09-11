@@ -39,8 +39,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .common import DLSS5Error
-from .linux_backend import _start_xvfb_if_needed, find_wine
+from .common import DLSS5Error, apply_gpu_pin
+from .linux_backend import _start_xvfb_if_needed, find_wine, resolve_wine_prefix
 
 SETUP_MAGIC = 0x31534746
 SETUP_OUT_MAGIC = 0x31524746
@@ -203,6 +203,12 @@ def _worker_env(runtime: Path) -> dict:
     env.setdefault("WINEDLLOVERRIDES", "d3d12,d3d12core,nvapi64,dxgi=n,b")
     env.setdefault("DXVK_LOG_LEVEL", "none")
     env.setdefault("VKD3D_DEBUG", "none")
+    # The worker's LD_LIBRARY_PATH is known to break wine-side NVIDIA shims
+    # (Astra A/B); the FG worker needs nothing from it either.
+    env.pop("LD_LIBRARY_PATH", None)
+    # CUDA_VISIBLE_DEVICES does not reach DXGI/Vulkan: without this the worker
+    # would land on NVIDIA adapter 0 - another worker's card on multi-GPU hosts.
+    apply_gpu_pin(env)
     # DXVK cannot enumerate the NVIDIA adapter without a display; headless
     # machines get a private Xvfb (same policy as the NR wine host).
     _start_xvfb_if_needed(env)
@@ -219,8 +225,7 @@ class FGSession:
         self.frame_bytes = self.width * self.height * 4
         self.generated_count = int(generated_count)
         env = _worker_env(runtime)
-        if wine_prefix:
-            env["WINEPREFIX"] = str(wine_prefix)
+        env["WINEPREFIX"] = resolve_wine_prefix(wine_prefix)
         try:
             self.proc = subprocess.Popen(
                 _worker_command(runtime, "--serve"),

@@ -203,7 +203,8 @@ pkill -x Xvfb
 | --- | --- |
 | `DLSS5_RUNTIME_DIR` | runtime 目录覆盖（`RH_DLSS5Enhance`） |
 | `DLSS5_FG_RUNTIME_DIR` | 帧生成 runtime 目录覆盖（`RH_DLSS5FrameInterpolation`） |
-| `DLSS5_GPU_INDEX` | worker 使用的 NVIDIA 适配器序号（默认 0）。刻意做成环境变量而非控件：队列平台每台 worker 本就绑定一块卡，控件里的手选值会和调度结果打架 |
+| `DLSS5_GPU_INDEX` | 手动指定 NVIDIA 适配器序号（DXGI 枚举序，默认 0），仅作逃生舱。默认情况下插件自动解析 `CUDA_VISIBLE_DEVICES` 把 wine 子进程钉到调度器绑定的那张卡上（DXGI/Vulkan 不认 CVD，不处理的话多卡机会落到别的 worker 的卡上）；已解析出 UUID 时用 `DXVK_FILTER_DEVICE_UUID` 精确锁定 |
+| `DLSS5_WINEPREFIX` | wine prefix 覆盖（Linux）。空则用 `~/.wine`；运行时校验 prefix 内必须已装 DXVK + DXVK-NVAPI（system32 下有 d3d12.dll 与 nvapi64.dll），缺失时先尝试 wineboot 现场生成并给出明确报错 |
 | `DLSS5NR_SNR_FILENAME` | 指定运行时目录里备用的 `nvngx_dlssnr*.dll` 纯文件名（覆盖自动选择） |
 | `DLSS5_WINE` | Wine 可执行文件覆盖（Linux） |
 | `DLSS5_WINEPREFIX` / `WINEPREFIX` | worker 的 Wine prefix |
