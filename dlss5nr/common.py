@@ -170,10 +170,11 @@ def _comfy_models_dir() -> Path:
 
 
 # The universal 310.8 DLSSNR build ships as nvngx_dlssnr.dll and covers RTX 20
-# through 50 (including Blackwell SM120).  A dedicated RTX 30/40-lineage build
-# may sit alongside as nvngx_dlssnr_rtx40.dll; prefer it on Ampere/Ada GPUs so
-# one models/dlss5 directory can serve every GPU generation.
+# through 50 (including Blackwell SM120).  Dedicated per-lineage builds may sit
+# alongside as nvngx_dlssnr_rtx30.dll / nvngx_dlssnr_rtx40.dll (same size,
+# different weights) so one models/dlss5 directory can serve every generation.
 SNR_DLL_DEFAULT = "nvngx_dlssnr.dll"
+SNR_DLL_RTX30 = "nvngx_dlssnr_rtx30.dll"
 SNR_DLL_RTX40 = "nvngx_dlssnr_rtx40.dll"
 
 
@@ -196,16 +197,24 @@ def resolve_snr_filename(runtime: Path, gpu_index: int = 0) -> str:
     """Pick the DLSSNR runtime DLL file name to load from `runtime`.
 
     DLSS5NR_SNR_FILENAME overrides everything (plain file name only).  Without
-    it, Ampere/Ada GPUs (capability major 8 = RTX 30/40) prefer
-    nvngx_dlssnr_rtx40.dll when the runtime folder provides it; every other
-    generation loads the universal nvngx_dlssnr.dll.
+    it, Ampere/Ada GPUs (capability major 8) prefer their lineage build: Ada
+    RTX 40 (SM89) loads nvngx_dlssnr_rtx40.dll, Ampere RTX 30 (SM80/86) loads
+    nvngx_dlssnr_rtx30.dll and falls back to the rtx40 build when that file is
+    missing; every other generation loads the universal nvngx_dlssnr.dll.
     """
     override = os.environ.get("DLSS5NR_SNR_FILENAME", "").strip()
     if override and "/" not in override and "\\" not in override and ".." not in override:
         return override
     capability = detect_gpu_capability(gpu_index)
-    if capability is not None and capability[0] == 8 and (runtime / SNR_DLL_RTX40).is_file():
-        return SNR_DLL_RTX40
+    if capability is not None and capability[0] == 8:
+        if capability[1] == 9:  # Ada / RTX 40
+            if (runtime / SNR_DLL_RTX40).is_file():
+                return SNR_DLL_RTX40
+        else:  # Ampere / RTX 30 lineage
+            if (runtime / SNR_DLL_RTX30).is_file():
+                return SNR_DLL_RTX30
+            if (runtime / SNR_DLL_RTX40).is_file():
+                return SNR_DLL_RTX40
     return SNR_DLL_DEFAULT
 
 

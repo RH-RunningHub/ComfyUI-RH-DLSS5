@@ -85,7 +85,8 @@ ComfyUI/
         ├── _nvngx.dll              # NGX core loader (~1.4 MB)
         ├── nvngx_dlss.dll          # DLSS Super Resolution carrier (~59 MB), >1x modes only
         ├── nvngx_dlssnr.dll        # DLSSNR neural rendering runtime (~166 MB) — universal build
-        ├── nvngx_dlssnr_rtx40.dll  # optional RTX 30/40-lineage build, auto-selected on those GPUs
+        ├── nvngx_dlssnr_rtx30.dll  # optional RTX 30-lineage build, auto-selected on those GPUs
+        ├── nvngx_dlssnr_rtx40.dll  # optional RTX 40-lineage build, auto-selected on those GPUs
         └── dlssg/                  # frame interpolation runtime (RH_DLSS5FrameInterpolation):
             ├── dlssg-worker.exe    #   D3D12 NGX frame generation host (MIT, not an NVIDIA binary)
             ├── nvngx.dll           #   NGX SDK loader stub
@@ -98,7 +99,8 @@ ComfyUI/
 | File | Source |
 | --- | --- |
 | `nvngx_dlssnr.dll` | Universal DLSSNR runtime build covering RTX 20 through 50 (required) |
-| `nvngx_dlssnr_rtx40.dll` | Optional dedicated RTX 30/40-lineage 310.8 build; auto-loaded on RTX 30/40 when present |
+| `nvngx_dlssnr_rtx30.dll` | Optional dedicated RTX 30-lineage 310.8 build; auto-loaded on RTX 30 when present |
+| `nvngx_dlssnr_rtx40.dll` | Optional dedicated RTX 40-lineage 310.8 build; auto-loaded on RTX 40 when present |
 | `nvngx_dlss.dll` | Official NVIDIA DLSS SDK releases ([github.com/NVIDIA/DLSS/releases](https://github.com/NVIDIA/DLSS/releases), `ngx_dlss_demo_windows.zip`), only needed for >1x |
 | `_nvngx.dll` | Extract from an NVIDIA driver package: `7z e <driver>.exe "Display.Driver/_nvngx.dll"` — see `runtime/README.txt` |
 
@@ -106,10 +108,11 @@ ComfyUI/
 
 | GPU | Tested | Notes |
 | --- | --- | --- |
-| RTX 30 / 40 series | ✅ (RTX 4090, driver 580.95.05) | Prefers `nvngx_dlssnr_rtx40.dll` when present, else the universal build |
+| RTX 30 series | ⚠️ not yet tested | Selects `nvngx_dlssnr_rtx30.dll` when present, else the rtx40 build, else the universal one |
+| RTX 40 series | ✅ (RTX 4090, driver 580.95.05) | Prefers `nvngx_dlssnr_rtx40.dll` when present, else the universal build |
 | RTX 50 series / RTX 6000D (SM120) | ✅ (RTX 6000D, driver 580.95.05) | Uses the universal `nvngx_dlssnr.dll` |
 
-The plugin picks the runtime build automatically from the GPU's compute capability (Ampere/Ada prefer the `_rtx40` file, every other generation uses the universal one). Set `DLSS5NR_SNR_FILENAME` to a plain file name in the runtime folder to override.
+The plugin picks the runtime build automatically from the GPU's compute capability (RTX 40/Ada prefers `_rtx40`, RTX 30/Ampere prefers `_rtx30` then falls back to `_rtx40`, every other generation uses the universal one). Set `DLSS5NR_SNR_FILENAME` to a plain file name in the runtime folder to override.
 
 No HuggingFace/ModelScope mirrors exist for these DLLs — any third-party mirror is unofficial and untrusted; download only from NVIDIA.
 

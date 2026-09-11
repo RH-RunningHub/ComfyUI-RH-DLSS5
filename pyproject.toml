@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-RH-DLSS5"
 description = "DLSS 5 Neural Rendering (NGX feature 18) enhance/upscale plus DLSS frame generation (2x/3x/4x frame-rate multiplication) for ComfyUI IMAGE and VIDEO. Windows in-process D3D12 bridge and Linux/Wine worker backends."
-version = "260911.00.37"
+version = "260911.13.52"
 license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.10"

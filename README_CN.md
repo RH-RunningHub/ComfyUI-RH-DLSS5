@@ -85,7 +85,8 @@ ComfyUI/
         ├── _nvngx.dll              # NGX core 加载器（~1.4 MB）
         ├── nvngx_dlss.dll          # DLSS 超分载体（~59 MB），仅 >1x 模式需要
         ├── nvngx_dlssnr.dll        # DLSSNR 神经渲染运行时（~166 MB）——通用构建
-        ├── nvngx_dlssnr_rtx40.dll  # 可选的 RTX 30/40 系专用构建，对应显卡自动加载
+        ├── nvngx_dlssnr_rtx30.dll  # 可选的 RTX 30 系专用构建，对应显卡自动加载
+        ├── nvngx_dlssnr_rtx40.dll  # 可选的 RTX 40 系专用构建，对应显卡自动加载
         └── dlssg/                  # 帧插值节点运行时（RH_DLSS5FrameInterpolation）：
             ├── dlssg-worker.exe    #   D3D12 NGX 帧生成宿主（MIT，非 NVIDIA 二进制）
             ├── nvngx.dll           #   NGX SDK 加载桩
@@ -98,7 +99,8 @@ ComfyUI/
 | 文件 | 来源 |
 | --- | --- |
 | `nvngx_dlssnr.dll` | 覆盖 RTX 20–50 的通用 DLSSNR 运行时构建（必须） |
-| `nvngx_dlssnr_rtx40.dll` | 可选的 RTX 30/40 系 310.8 专用构建；存在时 RTX 30/40 自动优先加载 |
+| `nvngx_dlssnr_rtx30.dll` | 可选的 RTX 30 系 310.8 专用构建；存在时 RTX 30 自动优先加载 |
+| `nvngx_dlssnr_rtx40.dll` | 可选的 RTX 40 系 310.8 专用构建；存在时 RTX 40 自动优先加载 |
 | `nvngx_dlss.dll` | NVIDIA 官方 DLSS SDK releases（[github.com/NVIDIA/DLSS/releases](https://github.com/NVIDIA/DLSS/releases)，`ngx_dlss_demo_windows.zip`），仅 >1x 需要 |
 | `_nvngx.dll` | NVIDIA 驱动包提取：`7z e <driver>.exe "Display.Driver/_nvngx.dll"`——详见 `runtime/README.txt` |
 
@@ -106,10 +108,11 @@ ComfyUI/
 
 | GPU | 实测 | 说明 |
 | --- | --- | --- |
-| RTX 30 / 40 系列 | ✅（RTX 4090，驱动 580.95.05） | 优先加载 `nvngx_dlssnr_rtx40.dll`，没有则回退通用构建 |
+| RTX 30 系列 | ⚠️ 未实测 | 优先加载 `nvngx_dlssnr_rtx30.dll`，没有则回退 rtx40 构建，再回退通用构建 |
+| RTX 40 系列 | ✅（RTX 4090，驱动 580.95.05） | 优先加载 `nvngx_dlssnr_rtx40.dll`，没有则回退通用构建 |
 | RTX 50 系列 / RTX 6000D（SM120） | ✅（RTX 6000D，驱动 580.95.05） | 使用通用 `nvngx_dlssnr.dll` |
 
-插件按显卡算力自动选择运行时构建（Ampere/Ada 优先 `_rtx40` 文件，其余代次用通用构建）。如需手动指定，把 `DLSS5NR_SNR_FILENAME` 设为运行时目录里的纯文件名即可。
+插件按显卡算力自动选择运行时构建（RTX 40/Ada 优先 `_rtx40`，RTX 30/Ampere 优先 `_rtx30`、缺失时回退 `_rtx40`，其余代次用通用构建）。如需手动指定，把 `DLSS5NR_SNR_FILENAME` 设为运行时目录里的纯文件名即可。
 
 这些 DLL 没有 HuggingFace/ModelScope 官方镜像——任何第三方镜像都非官方且不可信，请只从 NVIDIA 官方渠道获取。
 
