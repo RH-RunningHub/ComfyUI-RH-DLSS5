@@ -343,6 +343,8 @@ class RH_DLSS5Enhance:
                 # ---- 文件直传: 分块解码 + 逐帧流式编码, 内存峰值 O(块) ----
                 from .dlss5nr.fg import as_fps
                 fps = as_fps(reader.fps if reader.fps > 0 else 24.0)
+                print(f"[RH-DLSS5] Enhance chunked decode: {reader.count} frames "
+                      f"{reader.width}x{reader.height} @{reader.fps:g}fps from {src_path}", flush=True)
                 keep_audio = params["keep_audio"]
                 video_obj, iw, ih, ow, oh, order, engine = _run_frames_stream(
                     reader, fps, params, backend_name,
@@ -504,6 +506,8 @@ class RH_DLSS5FrameInterpolation:
                 # ---- 文件直传: 分块解码输入, 内存峰值 O(块) ----
                 reader, source = chunked
                 src_fps = as_fps(reader.fps if reader.fps > 0 else 24)
+                print(f"[RH-DLSS5] FG chunked decode: {reader.count} frames "
+                      f"{reader.width}x{reader.height} @{reader.fps:g}fps from {src_path}", flush=True)
                 if target_fps is not None and target_fps <= src_fps:
                     raise DLSS5Error(
                         f"target output fps ({float(target_fps):g}) must exceed the source "
