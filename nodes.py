@@ -15,6 +15,7 @@ import torch
 
 from .dlss5nr import common
 from .dlss5nr.common import DLSS5Error
+from .dlss5nr.decoder import ChunkedVideoReader, build_source
 from .dlss5nr.motion import TemporalGuideGenerator, sample_u8
 
 _UPSCALE_MODES = [
@@ -152,15 +153,22 @@ def _select_motion_engine(pixels_u8: np.ndarray, params: dict):
     return None, "none"
 
 
-def _frame_source(images: torch.Tensor, params: dict):
-    """Yield (rgb_u8, motion_fp16, reset) for every input frame."""
+def _frame_source_iter(frame_iter, params: dict, holder=None):
+    """Yield (rgb_u8, motion_fp16, reset) over an iterator of uint8 frames.
+
+    Shared by the tensor path (frames sampled from a float batch) and the
+    chunked-decode path (frames streamed from an ffmpeg pipe). `holder` lets
+    the streaming Enhance loop access the frame currently being processed for
+    channel-order detection without buffering the clip.
+    """
     temporal = params["batch_temporal"]
     flow_requested = params["motion_mode"] in ("auto", "nvof", "optical_flow")
     guides = None
     zero_motion: Optional[np.ndarray] = None
     seen_first = False
-    for index in range(images.shape[0]):
-        pixels_u8 = sample_u8(images[index].detach().cpu().numpy())
+    for pixels_u8 in frame_iter:
+        if holder is not None:
+            holder.current = pixels_u8
         if flow_requested and guides is None:
             guides, engine_note = _select_motion_engine(pixels_u8, params)
             params["motion_engine"] = engine_note
@@ -174,6 +182,13 @@ def _frame_source(images: torch.Tensor, params: dict):
             reset = (not temporal) or (not seen_first)
             seen_first = True
         yield pixels_u8, motion, reset
+
+
+def _frame_source(images: torch.Tensor, params: dict):
+    """Yield (rgb_u8, motion_fp16, reset) for every input frame."""
+    return _frame_source_iter(
+        (sample_u8(images[index].detach().cpu().numpy()) for index in range(images.shape[0])),
+        params)
 
 
 def _progress_callback():
@@ -317,22 +332,44 @@ class RH_DLSS5Enhance:
             )
 
         if video is not None:
-            components = video.get_components()
-            frames = components.images
-            config = getattr(components, "config", None)
-            fps = float(getattr(config, "fps", 24.0) or 24.0) if config is not None else 24.0
-            keep_audio = params["keep_audio"]
-            result, iw, ih, ow, oh, order, engine = _run_frames(frames, params, backend_name)
-            from .dlss5nr.videoout import build_video
+            src_path = _audio_source_path_of(video)
+            reader = None
+            if src_path:
+                try:
+                    reader = ChunkedVideoReader(src_path)
+                except Exception as exc:
+                    print(f"[RH-DLSS5] chunked decode unavailable ({exc}); full decode", flush=True)
+            if reader is not None:
+                # ---- 文件直传: 分块解码 + 逐帧流式编码, 内存峰值 O(块) ----
+                from .dlss5nr.fg import as_fps
+                fps = as_fps(reader.fps if reader.fps > 0 else 24.0)
+                keep_audio = params["keep_audio"]
+                video_obj, iw, ih, ow, oh, order, engine = _run_frames_stream(
+                    reader, fps, params, backend_name,
+                    source_video=video if keep_audio else None)
+                out_video = video_obj
+                notes.append(
+                    f"VIDEO {reader.count} frames @{float(fps):g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} "
+                    f"(chunked decode, streaming encode, channel {order}, motion {engine}"
+                    f"{', hdr' if params['hdr'] else ''}{gt_note})"
+                )
+            else:
+                components = video.get_components()
+                frames = components.images
+                config = getattr(components, "config", None)
+                fps = float(getattr(config, "fps", 24.0) or 24.0) if config is not None else 24.0
+                keep_audio = params["keep_audio"]
+                result, iw, ih, ow, oh, order, engine = _run_frames(frames, params, backend_name)
+                from .dlss5nr.videoout import build_video
 
-            video_obj, note = build_video(
-                result, fps, components.audio if keep_audio else None, video
-            )
-            out_video = video_obj
-            notes.append(
-                f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} "
-                f"(channel {order}, motion {engine}{', hdr' if params['hdr'] else ''}{gt_note}); {note}"
-            )
+                video_obj, note = build_video(
+                    result, fps, components.audio if keep_audio else None, video
+                )
+                out_video = video_obj
+                notes.append(
+                    f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} "
+                    f"(channel {order}, motion {engine}{', hdr' if params['hdr'] else ''}{gt_note}); {note}"
+                )
 
         return out_image, out_video, " | ".join(notes)
 
@@ -415,7 +452,8 @@ class RH_DLSS5FrameInterpolation:
     def interpolate(self, **kwargs) -> tuple[Optional[torch.Tensor], object, str]:
         import gc
 
-        from .dlss5nr.fg import MULTIPLIERS, as_fps, interpolate_frames, interpolate_stream
+        from .dlss5nr.fg import (MULTIPLIERS, as_fps, interpolate_frames, interpolate_stream,
+                         interpolate_stream_from_source)
         from .dlss5nr.videoout import StreamEncoder, build_video, video_from_file
 
         image = kwargs.get("image")
@@ -458,74 +496,115 @@ class RH_DLSS5FrameInterpolation:
                 notes.append(vnote)
 
         if video is not None:
-            components = video.get_components()
-            frames = components.images
-            config = getattr(components, "config", None)
-            if config is not None and getattr(config, "fps", None):
-                src_fps = as_fps(config.fps)
+            chunked = None
+            src_path = _audio_source_path_of(video)
+            if src_path:
+                chunked = build_source(src_path)   # (reader, SequentialSource) 或 None
+            if chunked is not None:
+                # ---- 文件直传: 分块解码输入, 内存峰值 O(块) ----
+                reader, source = chunked
+                src_fps = as_fps(reader.fps if reader.fps > 0 else 24)
+                if target_fps is not None and target_fps <= src_fps:
+                    raise DLSS5Error(
+                        f"target output fps ({float(target_fps):g}) must exceed the source "
+                        f"rate ({float(src_fps):g}); interpolation only increases frame rate.")
+                total_in, height, width = int(reader.count), int(reader.height), int(reader.width)
+                audio = audio_input if keep_audio else None
+                out_fps = target_fps if target_fps is not None else src_fps * multiplier
+                # audio=None + source_video=video: StreamEncoder 从源文件流拷贝音轨
+                encoder = StreamEncoder(width, height, out_fps, audio,
+                                        video if audio_input is None else None)
+                bar = ProgressBar(100)
+                try:
+                    out_fps, note = interpolate_stream_from_source(
+                        source, total_in, width, height, src_fps, multiplier,
+                        motion_mode, threshold, runtime_dir, wine_prefix,
+                        progress_callback=lambda done, total: bar.update_absolute(100 * done // max(1, total)),
+                        frame_sink=encoder.write, target_fps=target_fps,
+                    )
+                    encoder.close()
+                except BaseException:
+                    encoder.abort()
+                    raise
+                out_video = video_from_file(encoder.path)
+                if encoder.source:
+                    audio_note = "audio stream-copied from source"
+                elif audio_input is not None:
+                    audio_note = "audio re-encoded from audio input"
+                else:
+                    audio_note = "no audio stream"
+                notes.append(f"VIDEO {total_in} source frames "
+                             f"@{float(src_fps):g}->{float(out_fps):g}fps, chunked decode + "
+                             f"streaming encode, {audio_note}; {note}")
             else:
-                frame_rate = getattr(components, "frame_rate", None)
-                src_fps = as_fps(frame_rate if frame_rate is not None else 24)
-            if target_fps is not None and target_fps <= src_fps:
-                # Reject before decoding the whole clip: interpolate_stream
-                # would only validate after the uint8 decode and encoder spawn.
-                raise DLSS5Error(
-                    f"target output fps ({float(target_fps):g}) must exceed the source "
-                    f"rate ({float(src_fps):g}); interpolation only increases frame rate.")
-            total_in = int(frames.shape[0])
-            height, width = int(frames.shape[1]), int(frames.shape[2])
-            if not keep_audio:
-                audio = None
-            elif audio_input is not None:
-                audio = audio_input  # explicit AUDIO input replaces the source track
-            else:
-                audio = components.audio
+                components = video.get_components()
+                frames = components.images
+                config = getattr(components, "config", None)
+                if config is not None and getattr(config, "fps", None):
+                    src_fps = as_fps(config.fps)
+                else:
+                    frame_rate = getattr(components, "frame_rate", None)
+                    src_fps = as_fps(frame_rate if frame_rate is not None else 24)
+                if target_fps is not None and target_fps <= src_fps:
+                    # Reject before decoding the whole clip: interpolate_stream
+                    # would only validate after the uint8 decode and encoder spawn.
+                    raise DLSS5Error(
+                        f"target output fps ({float(target_fps):g}) must exceed the source "
+                        f"rate ({float(src_fps):g}); interpolation only increases frame rate.")
+                total_in = int(frames.shape[0])
+                height, width = int(frames.shape[1]), int(frames.shape[2])
+                if not keep_audio:
+                    audio = None
+                elif audio_input is not None:
+                    audio = audio_input  # explicit AUDIO input replaces the source track
+                else:
+                    audio = components.audio
 
-            # Convert the decoded float batch to uint8 once, in bounded chunks,
-            # then release local float references: RGB uint8 is one quarter
-            # of float32 RGB. Upstream owners and cascade buffers may remain.
-            rgb = np.empty((total_in, height, width, 3), dtype=np.uint8)
-            chunk = max(1, (1 << 26) // max(1, height * width))
-            for start in range(0, total_in, chunk):
-                stop = min(total_in, start + chunk)
-                block = frames[start:stop].detach().cpu().mul(255.0).round_().clamp_(0.0, 255.0)
-                rgb[start:stop] = block.to(torch.uint8).numpy()
-            frames = None
-            try:
-                components.images = None
-            except Exception:
-                pass
-            gc.collect()
+                # Convert the decoded float batch to uint8 once, in bounded chunks,
+                # then release local float references: RGB uint8 is one quarter
+                # of float32 RGB. Upstream owners and cascade buffers may remain.
+                rgb = np.empty((total_in, height, width, 3), dtype=np.uint8)
+                chunk = max(1, (1 << 26) // max(1, height * width))
+                for start in range(0, total_in, chunk):
+                    stop = min(total_in, start + chunk)
+                    block = frames[start:stop].detach().cpu().mul(255.0).round_().clamp_(0.0, 255.0)
+                    rgb[start:stop] = block.to(torch.uint8).numpy()
+                frames = None
+                try:
+                    components.images = None
+                except Exception:
+                    pass
+                gc.collect()
 
-            # Stream the interpolation straight into the encoder: no full
-            # float32 output tensor is ever built for the video path.
-            out_fps = target_fps if target_fps is not None else src_fps * multiplier
-            # With an explicit AUDIO input the source file must not win the
-            # stream-copy race in _audio_source_path; drop it so the user
-            # waveform is what gets encoded.
-            encoder = StreamEncoder(width, height, out_fps, audio,
-                                    video if audio_input is None else None)
-            bar = ProgressBar(100)
-            try:
-                out_fps, note = interpolate_stream(
-                    rgb, src_fps, multiplier, motion_mode, threshold, runtime_dir, wine_prefix,
-                    progress_callback=lambda done, total: bar.update_absolute(100 * done // max(1, total)),
-                    frame_sink=encoder.write, target_fps=target_fps,
-                )
-                encoder.close()
-            except BaseException:
-                encoder.abort()
-                raise
-            out_video = video_from_file(encoder.path)
-            if encoder.source:
-                audio_note = "audio stream-copied from source"
-            elif audio_input is not None:
-                audio_note = "audio re-encoded from audio input"
-            else:
-                audio_note = "no audio stream"
-            notes.append(f"VIDEO {total_in} source frames "
-                         f"@{float(src_fps):g}->{float(out_fps):g}fps, streaming encode, "
-                         f"{audio_note}; {note}")
+                # Stream the interpolation straight into the encoder: no full
+                # float32 output tensor is ever built for the video path.
+                out_fps = target_fps if target_fps is not None else src_fps * multiplier
+                # With an explicit AUDIO input the source file must not win the
+                # stream-copy race in _audio_source_path; drop it so the user
+                # waveform is what gets encoded.
+                encoder = StreamEncoder(width, height, out_fps, audio,
+                                        video if audio_input is None else None)
+                bar = ProgressBar(100)
+                try:
+                    out_fps, note = interpolate_stream(
+                        rgb, src_fps, multiplier, motion_mode, threshold, runtime_dir, wine_prefix,
+                        progress_callback=lambda done, total: bar.update_absolute(100 * done // max(1, total)),
+                        frame_sink=encoder.write, target_fps=target_fps,
+                    )
+                    encoder.close()
+                except BaseException:
+                    encoder.abort()
+                    raise
+                out_video = video_from_file(encoder.path)
+                if encoder.source:
+                    audio_note = "audio stream-copied from source"
+                elif audio_input is not None:
+                    audio_note = "audio re-encoded from audio input"
+                else:
+                    audio_note = "no audio stream"
+                notes.append(f"VIDEO {total_in} source frames "
+                             f"@{float(src_fps):g}->{float(out_fps):g}fps, streaming encode, "
+                             f"{audio_note}; {note}")
 
         return out_image, out_video, " | ".join(notes)
 
@@ -558,6 +637,59 @@ def _run_frames(images: torch.Tensor, params: dict, backend_name: str):
         corrected = np.clip(corrected, 0.0, 1.0)
         result[index].copy_(torch.from_numpy(corrected))
     return result, input_w, input_h, output_w, output_h, selected_order, params.get("motion_engine", "none")
+
+
+def _run_frames_stream(reader, fps, params: dict, backend_name: str, source_video=None,
+                       audio_input=None):
+    """Chunked-decode VIDEO path: stream every frame through the backend and the
+    encoder. Peak RAM is one chunk of input frames plus one output frame; the
+    full float32 result tensor (181 GB for 1824 4K frames - the 20260914 OOM)
+    is never built.
+    """
+    from .dlss5nr.videoout import StreamEncoder, video_from_file
+
+    input_w, input_h = int(reader.width), int(reader.height)
+    output_w, output_h = common.target_size(input_w, input_h, params["scale"])
+    params = dict(params)
+    frame_count = int(reader.count)
+    params["frame_count"] = frame_count
+    params["perf_quality"] = [
+        min(common.SCALE_TO_PERF_QUALITY, key=lambda c: abs(c - params["scale"]))
+    ]
+    backend = _load_backend(backend_name)
+
+    encoder = StreamEncoder(output_w, output_h, fps, audio_input, source_video)
+    holder = _FrameHolder()
+    progress = _progress_callback()
+    selected_order = None
+    try:
+        for index, output in enumerate(backend.process_frames(
+            _frame_source_iter(reader.iter_frames(), params, holder),
+            input_w, input_h, output_w, output_h, params, progress
+        )):
+            need_ref = selected_order is None and params["channel_order"] == "auto"
+            reference = (holder.current.astype(np.float32) / 255.0) if need_ref else output
+            corrected, order = _channel_choice(
+                output, reference,
+                params["channel_order"] if selected_order is None else selected_order
+            )
+            selected_order = order
+            corrected = np.clip(corrected, 0.0, 1.0)
+            encoder.write(np.ascontiguousarray(corrected * 255.0).round().astype(np.uint8))
+        encoder.close()
+    except BaseException:
+        encoder.abort()
+        raise
+    return (video_from_file(encoder.path), input_w, input_h, output_w, output_h,
+            selected_order, params.get("motion_engine", "none"))
+
+
+class _FrameHolder:
+    """Keeps the frame currently flowing through the motion generator so the
+    channel-order probe can compare it against the backend output."""
+
+    def __init__(self):
+        self.current = None
 
 
 def _audio_source_path_of(video) -> Optional[str]:

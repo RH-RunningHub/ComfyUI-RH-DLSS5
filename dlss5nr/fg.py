@@ -31,6 +31,7 @@ import platform
 import struct
 import subprocess
 import threading
+import uuid
 from contextlib import closing
 from collections import deque
 from fractions import Fraction
@@ -468,39 +469,77 @@ def _prepare(src_fps, width: int, height: int, frames_count: int, runtime_dir: s
     return runtime, src_fps
 
 
-def _sampled_frames(sources, count, runtime, src_fps, stages, out_fps,
+def _stage_buffer_path():
+    """Disk-backed scratch for cascade stage grids (never /tmp: containers
+    often mount tmpfs there, which would put the "disk" buffer back in RAM)."""
+    try:
+        from folder_paths import get_temp_directory
+        d = Path(get_temp_directory())
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        import tempfile
+        d = Path(tempfile.mkdtemp(prefix="dlss5_cascade_"))
+    return d / f"dlss5_cascade_{uuid.uuid4().hex}.raw"
+
+
+def _sampled_frames(sources, count: int, runtime, src_fps, stages, out_fps,
                     wine_prefix, threshold, motion_mode, progress_callback, engines):
-    """Buffer only non-final RGBA grids; sample the last pass as it is emitted."""
+    """Buffer only non-final RGBA grids; sample the last pass as it is emitted.
+
+    Non-final grids are streamed to a scratch file and re-read through a
+    read-only memmap: dirty page cache never accumulates a whole stage in RAM
+    (3x/4x grids at 4K reached ~121 GB before; 20260914 OOM incident)."""
     total = sum((count - 1) * 2 ** stage + 1 for stage in range(stages))
     done = 0
+    scratch: list[Path] = []
 
     def progress(current, _total):
         if progress_callback is not None:
             progress_callback(done + current, total)
 
-    for stage in range(stages):
-        grid_count = 2 * count - 1
-        frames = _stage_frames(sources, count, runtime, src_fps * 2 ** stage,
-                               wine_prefix, threshold, motion_mode, progress, engines)
-        with closing(frames):
-            if stage == stages - 1:
-                picks = iter(_pick_indices(grid_count, src_fps * 2 ** stages, out_fps))
-                wanted = next(picks, None)
-                for index, item in enumerate(frames):
-                    if index == wanted:
-                        yield item
-                        wanted = next(picks, None)
-                # Exhaust the stage even when its last grid point isn't selected:
-                # progress and worker cleanup must still finish.
-            else:
-                buffer = None
-                for index, (rgba, _) in enumerate(frames):
-                    if buffer is None:
-                        buffer = np.empty((grid_count, *rgba.shape), dtype=np.uint8)
-                    buffer[index] = rgba
-                sources = _rgba_source(buffer)
-        done += count
-        count = grid_count
+    try:
+        for stage in range(stages):
+            grid_count = 2 * count - 1
+            frames = _stage_frames(sources, count, runtime, src_fps * 2 ** stage,
+                                   wine_prefix, threshold, motion_mode, progress, engines)
+            with closing(frames):
+                if stage == stages - 1:
+                    picks = iter(_pick_indices(grid_count, src_fps * 2 ** stages, out_fps))
+                    wanted = next(picks, None)
+                    for index, item in enumerate(frames):
+                        if index == wanted:
+                            yield item
+                            wanted = next(picks, None)
+                    # Exhaust the stage even when its last grid point isn't selected:
+                    # progress and worker cleanup must still finish.
+                else:
+                    spill = None
+                    written = 0
+                    for index, (rgba, _) in enumerate(frames):
+                        if spill is None:
+                            spill = _stage_buffer_path()
+                            scratch.append(spill)
+                            fh = open(spill, "wb")
+                            shape = rgba.shape
+                        fh.write(np.ascontiguousarray(rgba).tobytes())
+                        written += 1
+                    if spill is None:
+                        raise DLSS5Error("cascade stage produced no frames")
+                    fh.close()
+                    if written != grid_count:
+                        raise DLSS5Error(
+                            f"cascade stage wrote {written} frames, expected {grid_count}")
+                    buffer = np.memmap(str(spill), dtype=np.uint8, mode="r",
+                                       shape=(grid_count, *shape))
+                    sources = _rgba_source(buffer)
+            done += count
+            count = grid_count
+    finally:
+        for p in scratch:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def interpolate_frames(images: torch.Tensor, src_fps, multiplier: int, motion_mode: str = "auto",
@@ -535,6 +574,35 @@ def interpolate_frames(images: torch.Tensor, src_fps, multiplier: int, motion_mo
     return result, out_fps, note
 
 
+def interpolate_stream_from_source(sources, count: int, width: int, height: int, src_fps,
+                                   multiplier: int, motion_mode: str = "auto",
+                                   scene_threshold: float = 0.24, runtime_dir: str = "",
+                                   wine_prefix: str = "", progress_callback=None,
+                                   frame_sink=None, target_fps: Fraction | None = None) -> tuple[Fraction, str]:
+    """interpolate_stream over a lazy (rgba_u8, src_float) source accessor.
+
+    Lets file-backed VIDEO inputs decode chunk-by-chunk instead of holding the
+    whole clip in RAM (see dlss5nr.decoder). The source is consumed strictly
+    forward, index 0..count-1 once - same walk _stage_frames already does.
+    """
+    if frame_sink is None:
+        raise DLSS5Error("interpolate_stream needs a frame_sink callable.")
+    stages, out_fps, _ = _plan(src_fps, multiplier, target_fps)
+    runtime, src_fps = _prepare(src_fps, width, height, count, runtime_dir)
+    engines = []
+    frames = _sampled_frames(sources, count, runtime, src_fps, stages,
+                             out_fps, wine_prefix, scene_threshold, motion_mode,
+                             progress_callback, engines)
+    emitted = 0
+    with closing(frames):
+        for rgba, _ in frames:
+            frame_sink(np.ascontiguousarray(rgba[..., :3]))
+            emitted += 1
+    note = (f"dlssg engine={engines[0]} {count}->{emitted} frames "
+            f"@{out_fps}fps, {2 ** stages}x grid, no tail extension (runtime {runtime})")
+    return out_fps, note
+
+
 def interpolate_stream(rgb, src_fps, multiplier: int, motion_mode: str = "auto",
                        scene_threshold: float = 0.24, runtime_dir: str = "",
                        wine_prefix: str = "", progress_callback=None,
@@ -548,17 +616,9 @@ def interpolate_stream(rgb, src_fps, multiplier: int, motion_mode: str = "auto",
     if rgb.ndim != 4 or rgb.shape[-1] != 3:
         raise DLSS5Error("DLSS frame interpolation expects (T, H, W, 3) frames.")
     count, height, width, _ = rgb.shape
-    stages, out_fps, _ = _plan(src_fps, multiplier, target_fps)
-    runtime, src_fps = _prepare(src_fps, width, height, count, runtime_dir)
-    engines = []
-    frames = _sampled_frames(_rgb_source(rgb), count, runtime, src_fps, stages,
-                             out_fps, wine_prefix, scene_threshold, motion_mode,
-                             progress_callback, engines)
-    emitted = 0
-    with closing(frames):
-        for rgba, _ in frames:
-            frame_sink(np.ascontiguousarray(rgba[..., :3]))
-            emitted += 1
-    note = (f"dlssg engine={engines[0]} {count}->{emitted} frames "
-            f"@{out_fps}fps, {2 ** stages}x grid, no tail extension (runtime {runtime})")
-    return out_fps, note
+    return interpolate_stream_from_source(
+        _rgb_source(rgb), count, width, height, src_fps, multiplier,
+        motion_mode=motion_mode, scene_threshold=scene_threshold,
+        runtime_dir=runtime_dir, wine_prefix=wine_prefix,
+        progress_callback=progress_callback, frame_sink=frame_sink,
+        target_fps=target_fps)

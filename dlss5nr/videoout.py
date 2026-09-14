@@ -226,13 +226,16 @@ class StreamEncoder:
             "-framerate", f"{fps.numerator}/{fps.denominator}",
             "-i", "-",
         ]
-        if audio_input is not None:
+        if audio_input is not None or source_video is not None:
+            # audio_input=None + source_video set: the chunked-decode paths skip
+            # get_components() (no waveform object), so stream-copy straight from
+            # the source file instead. `1:a?` tolerates audio-less sources.
             source = _audio_source_path(audio_input, source_video)
             if source:
                 self.source = source
                 command += ["-i", source, "-map", "0:v:0", "-map", "1:a?",
                             "-c:a", "copy", "-shortest"]
-            else:
+            elif audio_input is not None:
                 # No source file to copy from: re-encode the AUDIO object itself.
                 # apad + -shortest pads short audio with silence so the VIDEO
                 # length always wins (a shorter track must not truncate it).
