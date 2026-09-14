@@ -657,7 +657,7 @@ def _run_frames_stream(reader, fps, params: dict, backend_name: str, source_vide
     params = dict(params)
     frame_count = int(reader.count)
     params["frame_count"] = frame_count
-    params["perf_quality"] = [
+    params["perf_quality"] = common.SCALE_TO_PERF_QUALITY[
         min(common.SCALE_TO_PERF_QUALITY, key=lambda c: abs(c - params["scale"]))
     ]
     backend = _load_backend(backend_name)
@@ -668,7 +668,7 @@ def _run_frames_stream(reader, fps, params: dict, backend_name: str, source_vide
     selected_order = None
     try:
         for index, output in enumerate(backend.process_frames(
-            _frame_source_iter(reader.iter_frames(), params, holder),
+            _frame_source_iter((frame for _, frame in reader.iter_frames()), params, holder),
             input_w, input_h, output_w, output_h, params, progress
         )):
             need_ref = selected_order is None and params["channel_order"] == "auto"
