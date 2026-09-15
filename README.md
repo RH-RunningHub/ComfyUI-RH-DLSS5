@@ -16,7 +16,7 @@ Outputs are plain ComfyUI types: connect `images` to **SaveImage** and `video` t
 
 ## ✨ Features
 
-- Node `RH_DLSS5Enhance` (category **image/upscaling**): DLAA 1x enhance or fixed NVIDIA upsampling factors 1.5x / 1.724x / 2x / 3x.
+- Node `RH_DLSS5Enhance` (category **image/upscaling**): DLAA 1x enhance, fixed NVIDIA upsampling factors 1.5x / 1.724x / 2x / 3x, or auto resolution buckets **1K / 2K / 4K / 8K** that resolve per input to the smallest supported factor reaching the target short edge (16:9 sources land exactly on 1920x1080 / 2560x1440 / 3840x2160 / 7680x4320).
 - Node `RH_DLSS5FrameInterpolation` (category **video**): NVIDIA DLSS frame generation — 2x / 3x / 4x output frame rate with AI-generated frames interleaved between the sources (no frame blending). VIDEO inputs are interpolated and encoded **streaming** (frames go straight into the muxer), so peak host memory stays bounded regardless of clip length; audio is stream-copied from the source when available.
 - IMAGE and VIDEO I/O; batch = temporal order, audio preserved where supported.
 - Style / intensity / tone / structure / skin tuning parameters mapped to the official NGX DLSSNR properties, with automatic skin-region masking.
@@ -225,8 +225,8 @@ Connect **either** `image` or `video` (or both).
 | --- | --- | --- |
 | `image` | IMAGE | Batch = temporal order |
 | `video` | VIDEO | From LoadVideo; frames processed in playback order |
-| `upscaling_mode` | combo | `1x (DLAA)` native enhance, `1.5x / 1.724x / 2x / 3x` fixed NVIDIA factors (carrier + feature 18) |
-| `style` | combo | default / natural / cinematic, or **off (bypass NR)** — disables all processing, frames pass through untouched |
+| `upscaling_mode` | combo | `1x (DLAA)` native enhance; `1.5x / 1.724x / 2x / 3x` fixed NVIDIA factors (carrier + feature 18); **`1K / 2K / 4K / 8K`** auto buckets — the smallest supported factor whose **short edge** reaches 1080 / 1440 / 2160 / 4320 for the source's aspect ratio (16:9 lands exactly on 1920x1080 / 2560x1440 / 3840x2160 / 7680x4320). Sources already at or above the bucket stay at 1x (no downscaling); targets that even 3x cannot reach, or that would exceed the 7680x4320 output envelope, fail with a clear error |
+| `style` | combo | default / natural / cinematic, or **off (bypass NR)** — disables all processing; file-backed VIDEO inputs are passed through untouched (no decode, no re-encode), IMAGE batches are returned as-is |
 | `preset` | INT 0–9, default 0 | Internal render preset hint, passed to `DLSSNR.Hint.Render.Preset`. Keep 0 unless the docs of your runtime build define another value |
 | `intensity` | FLOAT 0.0–2.0, default 1.0 | Overall neural pass strength (`DLSSNR.Intensity`). 1.0 is full strength; >1.0 usually has no extra effect; <1.0 blends back towards the source for lighter denoising |
 | `tone` | FLOAT 0.0–2.0, default 1.0 | Local tone mapping strength (`DLSSNR.LocalToneStrength`; the global term `GlobalToneStrength` is fixed at 1.0). Higher = punchier local contrast, lower = flatter |
@@ -237,7 +237,7 @@ Connect **either** `image` or `video` (or both).
 | `scene_change_threshold` | FLOAT | Scene-cut history reset threshold (optical flow only) |
 | `batch_mode` | combo | `temporal sequence` keeps history between frames; `still images` resets every frame |
 | `warmup_frames` | INT | Warm-up budget reported to the worker (0 is fine) |
-| `keep_audio` | combo | Keep original audio in the VIDEO output when supported |
+| `keep_audio` | combo | Keep the original audio in the VIDEO output when supported; off drops the audio track |
 | `backend` | combo | auto / linux-wine / windows-bridge |
 | `channel_order` | combo | auto-detects R/B swap of the runtime output; force RGBA/BGRA on wrong colours |
 | `runtime_dir` | STRING | Optional runtime folder override; when empty the lookup order is `DLSS5_RUNTIME_DIR` → `<ComfyUI>/models/dlss5` → the bundled `runtime/` |
@@ -257,10 +257,10 @@ Connect **either** `video` (frame rate and audio are taken from it) or `image`. 
 | --- | --- | --- |
 | `video` | VIDEO | From LoadVideo; source frame rate and audio come from this input |
 | `image` | IMAGE | Batch = frames in temporal order; batches are treated as a 24fps source |
-| `output_fps` | combo | `2x` / `3x` / `4x` frame-rate multiplication, or an exact target output rate (23.976–144 fps presets). For a target rate the node builds the smallest 2x/4x/8x dense grid and nearest-picks the target timeline (no duplicated frames); target rates must exceed the source rate and stay within 6x |
+| `output_fps` | combo | **`1x` passthrough** — the source is returned untouched (no interpolation, no re-encode; the VIDEO object is passed through as-is, motion/keep_audio options are ignored); `2x` / `3x` / `4x` frame-rate multiplication; or an exact target output rate (23.976–144 fps presets). For a target rate the node builds the smallest 2x/4x/8x dense grid and nearest-picks the target timeline (no duplicated frames); target rates must exceed the source rate and stay within 6x |
 | `motion` | combo | `auto` = hardware NVOFA optical flow when available, else OpenCV DIS; `nvof` / `dis` force one guide. Generated frames are skipped across scene cuts |
 | `scene_change_threshold` | FLOAT 0.01–1.0, default 0.24 | Mean luminance change above which temporal history resets (scene-cut detection). Higher = fewer resets |
-| `keep_audio` | combo on/off, default on | Keep the original audio in the VIDEO output: stream-copied from the source file, re-encoded from the AUDIO input when no file is available |
+| `keep_audio` | combo on/off, default on | Keep the original audio in the VIDEO output: stream-copied from the source file, re-encoded from the AUDIO input when no file is available; **off** drops the audio track entirely (applies to both fixed and target-rate runs; the `1x` passthrough always keeps the source audio) |
 | `audio` | AUDIO | Optional audio socket: replaces the source audio on VIDEO inputs (while keep_audio is on) and is the only way to attach sound to IMAGE inputs. Re-encoded to AAC when it cannot be stream-copied |
 | `runtime_dir` | STRING | Optional override of the folder holding `dlssg-worker.exe + nvngx.dll + _nvngx.dll + nvngx_dlssg.dll`; lookup order `DLSS5_FG_RUNTIME_DIR` → `<models>/dlss5/dlssg` → bundled `runtime/dlssg` |
 | `wine_prefix` | STRING | Linux: WINEPREFIX override for the worker (needs DXVK + vkd3d-proton + DXVK-NVAPI, same stack as the enhance node) |

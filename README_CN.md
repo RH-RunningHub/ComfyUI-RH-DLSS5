@@ -16,7 +16,7 @@
 
 ## ✨ 功能特点
 
-- 节点 `RH_DLSS5Enhance`（**image/upscaling** 分类）：DLAA 1x 原尺寸增强，或 NVIDIA 固定档 1.5x / 1.724x / 2x / 3x 放大。
+- 节点 `RH_DLSS5Enhance`（**image/upscaling** 分类）：DLAA 1x 原尺寸增强、NVIDIA 固定档 1.5x / 1.724x / 2x / 3x 放大，或 **1K / 2K / 4K / 8K** 自动档——按输入自动选最小可达倍率，使短边到达目标分辨率（16:9 源恰好落在 1920x1080 / 2560x1440 / 3840x2160 / 7680x4320）。
 - 节点 `RH_DLSS5FrameInterpolation`（**video** 分类）：NVIDIA DLSS 帧生成——可按目标输出帧率选择（也兼容 2x / 3x / 4x 倍率），AI 生成的插值帧直接插入源帧之间（不是融合混帧）。VIDEO 输入全程**流式**处理：插帧结果直接送编码器，峰值内存与片长无关；源文件音轨可直接 stream copy。
 - IMAGE 与 VIDEO 输入输出；批次顺序即时间顺序，支持尽量保留音轨。
 - style / intensity / tone / structure / skin 调参直接映射官方 NGX DLSSNR 属性，支持皮肤区域自动遮罩。
@@ -219,8 +219,8 @@ pkill -x Xvfb
 | --- | --- | --- |
 | `image` | IMAGE | 批次顺序即时间顺序 |
 | `video` | VIDEO | 来自 LoadVideo，按播放顺序逐帧处理 |
-| `upscaling_mode` | 下拉 | `1x (DLAA)` 原尺寸增强；`1.5x / 1.724x / 2x / 3x` 为 NVIDIA 固定档（载体 + feature 18 两阶段） |
-| `style` | 下拉 | default / natural / cinematic,或 **off (bypass NR)**——跳过全部处理,帧原样直通 |
+| `upscaling_mode` | 下拉 | `1x (DLAA)` 原尺寸增强；`1.5x / 1.724x / 2x / 3x` 为 NVIDIA 固定档（载体 + feature 18 两阶段）；**`1K / 2K / 4K / 8K`** 自动档——按源比例选最小可达的固定倍率，使**短边**到达 1080 / 1440 / 2160 / 4320（16:9 源恰好命中 1920x1080 / 2560x1440 / 3840x2160 / 7680x4320）。源已达到/超过目标档时保持 1x（不做缩小）；3x 也够不到、或会超出 7680x4320 输出包络时给出清晰报错 |
+| `style` | 下拉 | default / natural / cinematic,或 **off (bypass NR)**——跳过全部处理；文件直传的 VIDEO 原样透传（不解码、不重编码），IMAGE 批次原样返回 |
 | `preset` | INT，0–9，默认 0 | 内部渲染预设提示，直传 `DLSSNR.Hint.Render.Preset`。保持 0 即可，除非你所用 runtime 的文档明确给出其它值的含义 |
 | `intensity` | FLOAT，0.0–2.0，默认 1.0 | 神经渲染整体强度（`DLSSNR.Intensity`）。1.0 为全量；>1.0 通常无额外效果；<1.0 向原图回混，用于轻降噪 |
 | `tone` | FLOAT，0.0–2.0，默认 1.0 | 局部影调/对比映射强度（`DLSSNR.LocalToneStrength`；全局影调项 `GlobalToneStrength` 固定 1.0）。调高局部对比更强，调低更平 |
@@ -231,7 +231,7 @@ pkill -x Xvfb
 | `scene_change_threshold` | FLOAT | 镜头切换时重置时序历史的阈值（仅光流模式） |
 | `batch_mode` | 下拉 | `temporal sequence` 帧间保留时序历史；`still images` 每帧重置 |
 | `warmup_frames` | INT | 告知 worker 的预热预算（0 即可） |
-| `keep_audio` | 下拉 | 在 VIDEO 输出中尽量保留原音轨 |
+| `keep_audio` | 下拉 | 在 VIDEO 输出中尽量保留原音轨；off 完全去掉音轨 |
 | `backend` | 下拉 | auto / linux-wine / windows-bridge |
 | `channel_order` | 下拉 | 自动检测运行时输出的 R/B 交换；偏色时强制 RGBA/BGRA |
 | `runtime_dir` | 字符串 | 覆盖 runtime 目录；留空时按 `DLSS5_RUNTIME_DIR` → `<ComfyUI>/models/dlss5` → 插件自带 `runtime/` 顺序查找 |
@@ -251,10 +251,10 @@ pkill -x Xvfb
 | --- | --- | --- |
 | `video` | VIDEO | 来自 LoadVideo；源帧率与音轨取自该输入 |
 | `image` | IMAGE | 批次顺序即时间顺序；批次按 24fps 源处理 |
-| `output_fps` | 下拉 | `2x` / `3x` / `4x` 倍率插帧，或 23.976–144 fps 精确目标帧率。指定目标帧率时节点先构建不低于目标的 2x/4x/8x 稠密网格再最近邻取样（不重复帧）；目标帧率必须高于源帧率且不超过 6 倍 |
+| `output_fps` | 下拉 | **`1x` 直通**——源原样返回（不插帧、不重编码，VIDEO 对象原样透传，motion/keep_audio 选项不参与）；`2x` / `3x` / `4x` 倍率插帧；或 23.976–144 fps 精确目标帧率。指定目标帧率时节点先构建不低于目标的 2x/4x/8x 稠密网格再最近邻取样（不重复帧）；目标帧率必须高于源帧率且不超过 6 倍 |
 | `motion` | 下拉 | `auto` = 有 NVOFA 硬件光流就用硬件，否则 OpenCV DIS；`nvof` / `dis` 强制指定。镜头切换处不产出生成帧 |
 | `scene_change_threshold` | FLOAT，0.01–1.0，默认 0.24 | 亮度均值变化超过该阈值即重置时序历史（镜头切换检测）。调高切换更少 |
-| `keep_audio` | 下拉 on/off，默认 on | VIDEO 输出保留原音轨：优先从源文件 stream copy,没有源文件时从 AUDIO 输入重编码 |
+| `keep_audio` | 下拉 on/off，默认 on | VIDEO 输出保留原音轨：优先从源文件 stream copy,没有源文件时从 AUDIO 输入重编码；**off** 完全去掉音轨（固定倍率与目标帧率均生效；`1x` 直通始终保留源音轨） |
 | `audio` | AUDIO | 可选音轨输入：VIDEO 输入时（keep_audio=on）覆盖原音轨；IMAGE 输入时是唯一的配音方式。无法 stream copy 时重编码为 AAC |
 | `runtime_dir` | 字符串 | 覆盖 `dlssg-worker.exe + nvngx.dll + _nvngx.dll + nvngx_dlssg.dll` 所在目录；查找顺序 `DLSS5_FG_RUNTIME_DIR` → `<models>/dlss5/dlssg` → 插件自带 `runtime/dlssg` |
 | `wine_prefix` | 字符串 | Linux：覆盖 worker 的 WINEPREFIX（需要 DXVK + vkd3d-proton + DXVK-NVAPI，与增强节点同一套栈） |
