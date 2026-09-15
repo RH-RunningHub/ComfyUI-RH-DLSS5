@@ -657,7 +657,7 @@ def _run_frames_stream(reader, fps, params: dict, backend_name: str, source_vide
     params = dict(params)
     frame_count = int(reader.count)
     params["frame_count"] = frame_count
-    params["perf_quality"] = [
+    params["perf_quality"] = common.SCALE_TO_PERF_QUALITY[
         min(common.SCALE_TO_PERF_QUALITY, key=lambda c: abs(c - params["scale"]))
     ]
     backend = _load_backend(backend_name)
