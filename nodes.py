@@ -296,16 +296,24 @@ class RH_DLSS5Enhance:
                 out_video = video_obj
             note = f"IMAGE {int(image.shape[0])} frames; {note}"
         if video is not None:
-            components = video.get_components()
-            frames = components.images
-            config = getattr(components, "config", None)
-            fps = float(getattr(config, "fps", 24.0) or 24.0) if config is not None else 24.0
-            video_obj, _ = build_video(
-                frames, fps, components.audio if str(kwargs.get("keep_audio", "on")) == "on" else None,
-                video,
-            )
-            out_video = video_obj
-            note = f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps; {note}"
+            src_path = _audio_source_path_of(video)
+            if src_path:
+                # File-backed: pass the VIDEO object through untouched. Full
+                # decoding just to re-encode identical frames would OOM on
+                # long/4K clips (the 20260914 incident pattern).
+                out_video = video
+                note = f"VIDEO bypassed (style=off): file passed through unprocessed ({src_path})"
+            else:
+                components = video.get_components()
+                frames = components.images
+                config = getattr(components, "config", None)
+                fps = float(getattr(config, "fps", 24.0) or 24.0) if config is not None else 24.0
+                video_obj, _ = build_video(
+                    frames, fps, components.audio if str(kwargs.get("keep_audio", "on")) == "on" else None,
+                    video,
+                )
+                out_video = video_obj
+                note = f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps; {note}"
         return out_image, out_video, note
 
     def enhance(self, **kwargs) -> tuple[Optional[torch.Tensor], object, str]:
@@ -541,7 +549,7 @@ class RH_DLSS5FrameInterpolation:
                 out_fps = target_fps if target_fps is not None else src_fps * multiplier
                 # audio=None + source_video=video: StreamEncoder 从源文件流拷贝音轨
                 encoder = StreamEncoder(width, height, out_fps, audio,
-                                        video if audio_input is None else None)
+                                        video if (audio_input is None and keep_audio) else None)
                 bar = ProgressBar(100)
                 try:
                     out_fps, note = interpolate_stream_from_source(
@@ -609,9 +617,10 @@ class RH_DLSS5FrameInterpolation:
                 out_fps = target_fps if target_fps is not None else src_fps * multiplier
                 # With an explicit AUDIO input the source file must not win the
                 # stream-copy race in _audio_source_path; drop it so the user
-                # waveform is what gets encoded.
+                # waveform is what gets encoded. keep_audio=off must also drop
+                # the source file, or its audio track leaks into the output.
                 encoder = StreamEncoder(width, height, out_fps, audio,
-                                        video if audio_input is None else None)
+                                        video if (audio_input is None and keep_audio) else None)
                 bar = ProgressBar(100)
                 try:
                     out_fps, note = interpolate_stream(
