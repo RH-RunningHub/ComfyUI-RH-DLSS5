@@ -463,7 +463,11 @@ class RH_DLSS5FrameInterpolation:
         if image is None and video is None:
             raise DLSS5Error("RH DLSS5 Frame Interpolation needs at least one input: connect `image` or `video`.")
         choice = str(kwargs.get("output_fps", "2x") or "2x")
-        if choice in MULTIPLIERS:
+        if choice == "1x":
+            # 1x passthrough; the real handling is the early-return branch below
+            # (after out_image/out_video/notes are initialized).
+            multiplier, target_fps = 1, None
+        elif choice in MULTIPLIERS:
             multiplier, target_fps = MULTIPLIERS[choice], None
         else:
             multiplier, target_fps = 2, as_fps(choice)
