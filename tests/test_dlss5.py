@@ -220,3 +220,44 @@ def test_stream_encoder_audio_branch_semantics():
     src = (Path(__file__).resolve().parent.parent / "dlss5nr" / "videoout.py").read_text(encoding="utf-8")
     assert "audio_input is not None or source_video is not None" in src
     assert "-map", "1:a?" in src or '1:a?' in src   # 可选音轨映射保留
+
+
+# --------------------------------------------------------------------------
+# upscaling_mode 自动分辨率桶 (1K/2K/4K/8K -> 最小可达 DLSS 固定倍率)
+# --------------------------------------------------------------------------
+
+def test_auto_scale_factor_buckets():
+    common = _pkg.dlss5nr.common
+    # 16:9 720p 源: 1K/2K/4K 精确命中 1.5x/2x/3x (1920x1080 / 2560x1440 / 3840x2160)
+    assert common.auto_scale_factor(1280, 720, "1K") == 1.5
+    assert common.auto_scale_factor(1280, 720, "2K") == 2.0
+    assert common.auto_scale_factor(1280, 720, "4K") == 3.0
+    # 已达/超过桶 -> 1x (DLSS 不做缩小)
+    assert common.auto_scale_factor(1920, 1080, "1K") == 1.0
+    assert common.auto_scale_factor(3840, 2160, "4K") == 1.0
+    assert common.auto_scale_factor(7680, 4320, "8K") == 1.0
+    # 竖屏按短边: 1080x1920 选 2K -> 1.5x (1620 >= 1440)
+    assert common.auto_scale_factor(1080, 1920, "2K") == 1.5
+    # 最小可用倍率优先: 640x480 选 2K -> 3.0 (1440 恰好达标), 不超冲
+    assert common.auto_scale_factor(640, 480, "2K") == 3.0
+    # 不可达: 短边 * 3 仍低于桶
+    with pytest.raises(common.DLSS5Error):
+        common.auto_scale_factor(1280, 720, "8K")
+    with pytest.raises(common.DLSS5Error):
+        common.auto_scale_factor(500, 400, "2K")
+    # 包络超限: 达标倍率会把长边推出 7680x4320
+    with pytest.raises(common.DLSS5Error):
+        common.auto_scale_factor(1000, 3400, "4K")
+
+
+def test_auto_bucket_mode_params_defer_scale(monkeypatch):
+    common_mod = _pkg.dlss5nr.common
+    monkeypatch.setattr(common_mod, "check_runtime_files", lambda *a, **k: None)
+    monkeypatch.setattr(common_mod, "resolve_runtime_dir", lambda *a, **k: common_mod.PLUGIN_ROOT / "runtime")
+    nodes = _pkg.nodes
+    params = nodes._build_params({"upscaling_mode": "4K", "runtime_dir": "/nonexistent-runtime-for-test"})
+    assert params["auto_bucket"] == "4K"
+    assert params["scale"] is None
+    fixed = nodes._build_params({"upscaling_mode": "2x (Performance)", "runtime_dir": "/nonexistent-runtime-for-test"})
+    assert fixed["auto_bucket"] is None
+    assert fixed["scale"] == 2.0

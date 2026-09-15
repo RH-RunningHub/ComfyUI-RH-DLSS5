@@ -24,6 +24,10 @@ _UPSCALE_MODES = [
     "1.724x (Balanced)",
     "2x (Performance)",
     "3x (Ultra Performance)",
+    "1K",
+    "2K",
+    "4K",
+    "8K",
 ]
 
 _SCALE_KEY = {"1x": 1.0, "1.5x": 1.5, "1.724x": 1.724, "2x": 2.0, "3x": 3.0}
@@ -78,9 +82,19 @@ def _channel_choice(frame: np.ndarray, reference: np.ndarray, order: str) -> tup
 
 def _build_params(kwargs: dict) -> dict:
     mode = kwargs.get("upscaling_mode") or _UPSCALE_MODES[0]
-    scale = _SCALE_KEY[next(key for key in _SCALE_KEY if str(mode).startswith(key))]
     runtime = common.resolve_runtime_dir(kwargs.get("runtime_dir", "") or "")
-    common.check_runtime_files(runtime, scale)
+    mode_name = str(mode).strip()
+    auto_bucket = mode_name if mode_name in common.AUTO_BUCKETS else None
+    if auto_bucket is not None:
+        # Auto bucket ("1K"/"2K"/"4K"/"8K"): the concrete DLSS factor depends
+        # on the source size and is resolved per input at execute time (the
+        # engine only accepts the fixed factors in SCALE_TO_PERF_QUALITY).
+        # The always-required caller shim is checked now; the nvngx_dlss.dll
+        # requirement is re-checked once the resolved factor exceeds 1x.
+        common.check_runtime_files(runtime, 1.0)
+    else:
+        scale = _SCALE_KEY[next(key for key in _SCALE_KEY if str(mode).startswith(key))]
+        common.check_runtime_files(runtime, scale)
     # DLSS5_GPU_INDEX is the manual DXGI-ordinal escape hatch; the actual child
     # pinning (CUDA_VISIBLE_DEVICES-aware) happens in common.apply_gpu_pin at
     # launch time. This value only feeds capability-based DLL selection, in the
@@ -93,7 +107,8 @@ def _build_params(kwargs: dict) -> dict:
         "runtime": runtime,
         "gpu_index": gpu_index,
         "wine_prefix": str(kwargs.get("wine_prefix", "") or ""),
-        "scale": scale,
+        "scale": None if auto_bucket is not None else scale,
+        "auto_bucket": auto_bucket,
         "preset": int(kwargs.get("preset", 0)),
         "style": common.style_int(kwargs.get("style", "default")),
         "intensity": float(kwargs.get("intensity", 1.0)),
@@ -112,6 +127,23 @@ def _build_params(kwargs: dict) -> dict:
         "detail": float(kwargs.get("detail", 1.0)),
         "color": float(kwargs.get("color", 1.0)),
     }
+
+
+def _resolve_auto_scale(params: dict, width: int, height: int) -> tuple[dict, str]:
+    """Resolve an auto-bucket upscaling mode against concrete input dimensions.
+
+    Returns (possibly-copied params, human-readable note). Fixed-factor modes
+    pass through unchanged with an empty note.
+    """
+    bucket = params.get("auto_bucket")
+    if not bucket:
+        return params, ""
+    params = dict(params)
+    params["scale"] = common.auto_scale_factor(width, height, bucket)
+    if params["scale"] > 1.0:
+        common.check_runtime_files(params["runtime"], params["scale"])
+    return params, (f"auto {bucket}: short edge {min(int(width), int(height))}->"
+                    f"{common.AUTO_BUCKETS[bucket]} via {params['scale']:g}x")
 
 
 def _make_nvof_generator(width: int, height: int, threshold: float):
@@ -220,7 +252,7 @@ class RH_DLSS5Enhance:
             "optional": {
                 "image": ("IMAGE", {"tooltip": "Optional image batch (e.g. LoadImage). Each batch entry is one frame in temporal order."}),
                 "video": ("VIDEO", {"tooltip": "Optional video (e.g. LoadVideo). Frames are processed in temporal order."}),
-                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "1x enhances at native size; other modes upscale with the DLSS carrier (feature 1) before the neural pass (feature 18). Fixed NVIDIA factors only."}),
+                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "1x enhances at native size; other fixed modes upscale with the DLSS carrier (feature 1) before the neural pass (feature 18). 1K/2K/4K/8K auto-pick the smallest supported DLSS factor so the SHORT edge reaches 1080/1440/2160/4320 for the source's aspect ratio (16:9 sources land exactly on 1920x1080 / 2560x1440 / 3840x2160 / 7680x4320); sources already at or above the bucket stay at 1x (no downscaling), and unreachable targets (below 3x reach or beyond the 7680x4320 output envelope) fail with a clear error. Fixed NVIDIA factors only."}),
                 "style": (["default", "natural", "cinematic", "off (bypass NR)"], {"default": "default", "tooltip": "Neural rendering style. Natural stays closer to the source; cinematic pushes contrast. off (bypass NR) disables all processing: frames pass through untouched, upscaling included - use it when you want the original look or zero processing cost."}),
                 "preset": ("INT", {"default": 0, "min": 0, "max": 9, "step": 1, "tooltip": "Internal render preset hint (DLSSNR.Hint.Render.Preset). Keep 0 unless the runtime documents another value."}),
                 "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Neural pass strength. Above 1.0 usually has no extra effect; below 1.0 blends towards the source."}),
@@ -332,11 +364,13 @@ class RH_DLSS5Enhance:
         notes: list[str] = []
 
         if image is not None:
-            result, iw, ih, ow, oh, order, engine = _run_frames(image, params, backend_name)
+            img_params, auto_note = _resolve_auto_scale(params, int(image.shape[2]), int(image.shape[1]))
+            result, iw, ih, ow, oh, order, engine = _run_frames(image, img_params, backend_name)
             out_image = result
             notes.append(
                 f"IMAGE {int(image.shape[0])} frames {iw}x{ih}->{ow}x{oh} via {backend_name} "
                 f"(channel {order}, motion {engine}{', hdr' if params['hdr'] else ''}{gt_note})"
+                + (f"; {auto_note}" if auto_note else "")
             )
 
         if video is not None:
@@ -353,15 +387,17 @@ class RH_DLSS5Enhance:
                 fps = as_fps(reader.fps if reader.fps > 0 else 24.0)
                 print(f"[RH-DLSS5] Enhance chunked decode: {reader.count} frames "
                       f"{reader.width}x{reader.height} @{reader.fps:g}fps from {src_path}", flush=True)
+                vid_params, auto_note = _resolve_auto_scale(params, int(reader.width), int(reader.height))
                 keep_audio = params["keep_audio"]
                 video_obj, iw, ih, ow, oh, order, engine = _run_frames_stream(
-                    reader, fps, params, backend_name,
+                    reader, fps, vid_params, backend_name,
                     source_video=video if keep_audio else None)
                 out_video = video_obj
                 notes.append(
                     f"VIDEO {reader.count} frames @{float(fps):g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} "
                     f"(chunked decode, streaming encode, channel {order}, motion {engine}"
                     f"{', hdr' if params['hdr'] else ''}{gt_note})"
+                    + (f"; {auto_note}" if auto_note else "")
                 )
             else:
                 components = video.get_components()
@@ -369,7 +405,8 @@ class RH_DLSS5Enhance:
                 config = getattr(components, "config", None)
                 fps = float(getattr(config, "fps", 24.0) or 24.0) if config is not None else 24.0
                 keep_audio = params["keep_audio"]
-                result, iw, ih, ow, oh, order, engine = _run_frames(frames, params, backend_name)
+                vid_params, auto_note = _resolve_auto_scale(params, int(frames.shape[2]), int(frames.shape[1]))
+                result, iw, ih, ow, oh, order, engine = _run_frames(frames, vid_params, backend_name)
                 from .dlss5nr.videoout import build_video
 
                 video_obj, note = build_video(
@@ -379,6 +416,7 @@ class RH_DLSS5Enhance:
                 notes.append(
                     f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} "
                     f"(channel {order}, motion {engine}{', hdr' if params['hdr'] else ''}{gt_note}); {note}"
+                    + (f"; {auto_note}" if auto_note else "")
                 )
 
         return out_image, out_video, " | ".join(notes)

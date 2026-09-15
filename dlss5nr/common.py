@@ -31,6 +31,13 @@ PERF_QUALITY_NAMES = {
 }
 SCALE_TO_PERF_QUALITY = {1.0: 5, 1.5: 2, 1.724: 1, 2.0: 0, 3.0: 3}
 
+# Auto resolution buckets (upscaling_mode "1K"/"2K"/"4K"/"8K"): target for the
+# frame's SHORT edge. On 16:9 sources this matches the familiar long-edge
+# conventions (1920x1080 / 2560x1440 / 3840x2160 / 7680x4320); other aspect
+# ratios scale proportionally. The actual DLSS factor is resolved per input
+# (the engine only supports the fixed factors in SCALE_TO_PERF_QUALITY).
+AUTO_BUCKETS = {"1K": 1080, "2K": 1440, "4K": 2160, "8K": 4320}
+
 STYLE_VALUES = {"default": 0, "natural": 1, "cinematic": 2}
 
 MAX_DIM = 16384
@@ -124,6 +131,39 @@ def resolve_scale_factor(upscaling_mode: str) -> float:
         if upscaling_mode.startswith(name):
             return scale
     raise DLSS5Error(f"Unknown upscaling mode: {upscaling_mode!r}")
+
+
+def auto_scale_factor(width: int, height: int, bucket: str) -> float:
+    """Resolve an AUTO_BUCKETS mode to a concrete DLSS factor for this input.
+
+    Picks the smallest supported factor whose SHORT edge reaches the bucket;
+    a source already at/above the bucket stays at 1.0 (DLSS5 does not
+    downscale). Raises when even 3x cannot reach the bucket, or when the
+    result would exceed the DLSSNR output envelope.
+    """
+    bucket_short = AUTO_BUCKETS[bucket]
+    short = min(int(width), int(height))
+    if short >= bucket_short:
+        return 1.0
+    envelope_failed = False
+    for factor in sorted(SCALE_TO_PERF_QUALITY):
+        if factor <= 1.0:
+            continue
+        out_w, out_h = even(width * factor), even(height * factor)
+        if min(out_w, out_h) < bucket_short:
+            continue
+        if max(out_w, out_h) > MAX_LONG_EDGE or min(out_w, out_h) > MAX_SHORT_EDGE:
+            envelope_failed = True  # larger factors only overshoot further
+            break
+        return factor
+    if envelope_failed:
+        raise DLSS5Error(
+            f"Auto {bucket} from {width}x{height} would exceed the DLSSNR output "
+            f"envelope ({MAX_LONG_EDGE}x{MAX_SHORT_EDGE}) at the smallest factor that "
+            f"reaches the {bucket_short}-pixel short edge")
+    raise DLSS5Error(
+        f"Auto {bucket} is unreachable from {width}x{height}: even 3x yields a "
+        f"{int(3 * short)}-pixel short edge, below the {bucket_short}-pixel target")
 
 
 def target_size(width: int, height: int, scale_factor: float) -> tuple[int, int]:
