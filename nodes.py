@@ -668,7 +668,7 @@ def _run_frames_stream(reader, fps, params: dict, backend_name: str, source_vide
     selected_order = None
     try:
         for index, output in enumerate(backend.process_frames(
-            _frame_source_iter(reader.iter_frames(), params, holder),
+            _frame_source_iter((f for _i, f in reader.iter_frames()), params, holder),
             input_w, input_h, output_w, output_h, params, progress
         )):
             need_ref = selected_order is None and params["channel_order"] == "auto"
