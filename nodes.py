@@ -392,7 +392,7 @@ class RH_DLSS5FrameInterpolation:
         return {
             "required": {},
             "optional": {
-                "output_fps": (["2x", "3x", "4x", "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60", "72", "90", "96", "120", "144"], {"default": "2x", "tooltip": "Either a frame-rate multiplier (2x/3x/4x: DLSS generates one frame per interval, 3x/4x cascade 2x passes) or an exact target output frame rate. For a target rate the node cascades DLSS 2x passes into a dense CFR grid (2/4/8x source) and nearest-picks the target timeline, so e.g. a 24fps source at 60fps interpolates a 96fps grid and picks every ~1.6th frame (1-2-1-2 cadence, no duplicated frames). Target rates must exceed source fps and be at most 6x source; intermediate grid is at most 8x. No tail extension."}),
+                "output_fps": (["1x", "2x", "3x", "4x", "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60", "72", "90", "96", "120", "144"], {"default": "2x", "tooltip": "1x = passthrough: the source is returned untouched (no interpolation, no re-encode; the VIDEO object is passed through as-is, motion/keep_audio options are ignored). Either a frame-rate multiplier (2x/3x/4x: DLSS generates one frame per interval, 3x/4x cascade 2x passes) or an exact target output frame rate. For a target rate the node cascades DLSS 2x passes into a dense CFR grid (2/4/8x source) and nearest-picks the target timeline, so e.g. a 24fps source at 60fps interpolates a 96fps grid and picks every ~1.6th frame (1-2-1-2 cadence, no duplicated frames). Target rates must exceed source fps and be at most 6x source; intermediate grid is at most 8x. No tail extension."}),
                 "video": ("VIDEO", {"tooltip": "Optional video (e.g. LoadVideo). Source frame rate and audio come from this input."}),
                 "image": ("IMAGE", {"tooltip": "Optional image batch (e.g. LoadImage). Each batch entry is one frame in temporal order; batches are treated as a 24fps source."}),
                 "motion": (["auto", "nvof", "dis"], {"default": "auto", "tooltip": "Motion vectors guiding interpolation. auto = hardware NVOFA optical flow when available, else OpenCV DIS; nvof = hardware NVOFA only; dis = OpenCV DIS. Scene cuts or disabled generation hold the previous frame in each interpolation slot."}),
@@ -479,6 +479,26 @@ class RH_DLSS5FrameInterpolation:
         out_image: Optional[torch.Tensor] = None
         out_video = None
         notes: list[str] = []
+
+        if choice == "1x":
+            # 1x passthrough: no interpolation, no re-encode. The VIDEO object
+            # is returned as-is; the image batch is rebuilt into a video only
+            # for the video output slot, at the source frame rate.
+            if image is not None:
+                src_fps = as_fps(kwargs.get("images_fps", 24.0))
+                out_image = image
+                notes.append(f"IMAGE {int(image.shape[0])} frames @{float(src_fps):g}fps, "
+                             f"1x passthrough (no interpolation)")
+                video_obj, vnote = build_video(image, src_fps, kwargs.get("audio"), None)
+                if video_obj is not None:
+                    out_video = video_obj
+                if vnote:
+                    notes.append(vnote)
+            if video is not None:
+                out_video = video
+                notes.append("VIDEO 1x passthrough: source frames and audio unchanged "
+                             "(no interpolation)")
+            return out_image, out_video, " | ".join(notes)
 
         if image is not None:
             src_fps = as_fps(kwargs.get("images_fps", 24.0))
