@@ -226,7 +226,10 @@ class FGSession:
         self.frame_bytes = self.width * self.height * 4
         self.generated_count = int(generated_count)
         env = _worker_env(runtime)
-        env["WINEPREFIX"] = resolve_wine_prefix(wine_prefix)
+        # Windows runs the worker exe natively (see _worker_command); a wine
+        # prefix only exists there for explicitly chosen linux-wine sessions.
+        if platform.system() != "Windows":
+            env["WINEPREFIX"] = resolve_wine_prefix(wine_prefix)
         try:
             self.proc = subprocess.Popen(
                 _worker_command(runtime, "--serve"),

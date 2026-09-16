@@ -272,7 +272,7 @@ class RH_DLSS5Enhance:
                 "detail": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Composite strength over the original frame (reference tool's detail): 0 = keep the original, 1 = full NR result, up to 2 = amplify the model's change (brightening/denoise) beyond 100%. Blended in linear light."}),
                 "color": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Chroma follow (reference tool's color): 0 = keep the original hue and take only the model's luminance, 1 = take the model's colour fully. Guards against the model shifting colours."}),
                 "runtime_dir": ("STRING", {"default": "", "tooltip": "Optional override of the runtime folder holding nvngx_dlssnr.dll (and nvngx_dlss.dll for >1x). Empty uses DLSS5_RUNTIME_DIR, then the plugin's runtime/ folder."}),
-                "wine_prefix": ("STRING", {"default": "", "tooltip": "Linux only: WINEPREFIX for the worker. Empty uses DLSS5_WINEPREFIX, then ~/.wine; validated at run time (needs DXVK + DXVK-NVAPI installed in the prefix)."}),
+                "wine_prefix": ("STRING", {"default": "", "tooltip": "Linux only: WINEPREFIX for the worker (ignored on Windows, where the worker runs natively). Empty uses DLSS5_WINEPREFIX, then ~/.wine; validated at run time (needs DXVK + DXVK-NVAPI installed in the prefix)."}),
             },
         }
 
@@ -446,7 +446,7 @@ class RH_DLSS5FrameInterpolation:
                 "keep_audio": (["on", "off"], {"default": "on", "tooltip": "Keep the original audio in the VIDEO output. Audio is stream-copied from the source file; when no source file is available it is re-encoded from the AUDIO input instead."}),
                 "audio": ("AUDIO", {"tooltip": "Optional audio for the VIDEO output. With a VIDEO input it replaces the source audio while keep_audio is on; with an IMAGE input it is the only way to attach sound. Re-encoded to AAC when it cannot be stream-copied."}),
                 "runtime_dir": ("STRING", {"default": "", "tooltip": "Optional override of the folder holding dlssg-worker.exe + nvngx.dll + _nvngx.dll + nvngx_dlssg.dll. Empty uses DLSS5_FG_RUNTIME_DIR, then <DLSS5 runtime>/dlssg, then the plugin's runtime/dlssg folder."}),
-                "wine_prefix": ("STRING", {"default": "", "tooltip": "Linux only: WINEPREFIX for the worker. Empty uses DLSS5_WINEPREFIX, then ~/.wine; validated at run time (needs DXVK + DXVK-NVAPI installed in the prefix)."}),
+                "wine_prefix": ("STRING", {"default": "", "tooltip": "Linux only: WINEPREFIX for the worker (ignored on Windows, where the worker runs natively). Empty uses DLSS5_WINEPREFIX, then ~/.wine; validated at run time (needs DXVK + DXVK-NVAPI installed in the prefix)."}),
             },
         }
 
@@ -457,7 +457,8 @@ class RH_DLSS5FrameInterpolation:
     DESCRIPTION = (
         "Raises a video's frame rate with NVIDIA DLSS frame generation (NGX DLSS-FG): "
         "generated frames are interleaved between the source frames instead of blended. "
-        "Linux streams frames to dlssg-worker.exe under Wine; the worker runtime is "
+        "Linux streams frames to dlssg-worker.exe under Wine; Windows runs the worker "
+        "natively. The worker runtime is "
         "user-supplied and never redistributed. Connect the outputs to the standard "
         "SaveImage / SaveVideo nodes."
     )
