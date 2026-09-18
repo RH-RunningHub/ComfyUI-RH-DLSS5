@@ -265,6 +265,35 @@ def _gpu_uuid_table() -> dict[int, str | None]:
 
 
 _pinned_gpu_cache: tuple[str | None, int | None] | None | bool = False
+# 20260918 星光案定案: worker 运行期 os.environ 的 CUDA_VISIBLE_DEVICES 可能被
+# 改写为 '0' (torch 初始化后改写, 不影响 worker 自身), 引擎子进程继承后落到
+# CUDA 枚举首卡 = 别家实例的卡。因此取卡来源不能信任 CVD 本身, 走权威链并
+# 记录实际采用的来源供日志取证。
+_pinned_gpu_source: str = ""
+
+
+def _authoritative_gpu_entries() -> list[str]:
+    """取卡权威链 (与平台 _resolve_container_gpu_id 口径对齐), 返回首个条目组。
+
+    顺序:
+      1. cli_args.args.cuda_device -- 启动参数 --cuda-device (gpu_start.sh 注入),
+         进程内不可变, 最权威;
+      2. COMFYUI_CUDA_VISIBLE_DEVICES -- 容器级 env, 无运行期改写观测;
+      3. CUDA_VISIBLE_DEVICES -- 旧路径兜底 (无启动参数、无容器级变量时)。
+    """
+    try:
+        from comfy import cli_args as _cli
+        _cd = getattr(getattr(_cli, "args", None), "cuda_device", None)
+        if _cd is not None and str(_cd).lower() != "all":
+            return [str(int(_cd))]
+    except Exception:
+        pass
+    for name in ("COMFYUI_CUDA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        entries = [e.strip() for e in os.environ.get(name, "").split(",")
+                   if e.strip() and e.strip() != "-1"]
+        if entries:
+            return entries
+    return []
 
 
 def resolve_pinned_gpu() -> tuple[str | None, int | None] | None:
@@ -275,20 +304,22 @@ def resolve_pinned_gpu() -> tuple[str | None, int | None] | None:
     entirely - left alone, dlss5nr_host.exe and dlssg-worker.exe would land on
     NVIDIA adapter 0, i.e. another worker's card on multi-GPU hosts.
 
-    Returns (uuid_hex_32, physical_ordinal). The first CVD entry decides:
-    numeric entries map straight to the physical ordinal (NVML index space,
-    which matches the CUDA view on the homogeneous hosts this fleet runs) and
-    'GPU-<uuid>' entries carry the identity directly. Results are cached for
-    the process lifetime; the environment cannot change mid-run.
+    Returns (uuid_hex_32, physical_ordinal). The first authoritative entry
+    decides: numeric entries map straight to the physical ordinal (NVML index
+    space, which matches the CUDA view on the homogeneous hosts this fleet
+    runs) and 'GPU-<uuid>' entries carry the identity directly. Results are
+    cached for the process lifetime; the environment cannot change mid-run.
+    Source chain is _authoritative_gpu_entries (20260918: CUDA_VISIBLE_DEVICES
+    alone is NOT trustworthy - it can be rewritten to '0' mid-run).
     """
-    global _pinned_gpu_cache
+    global _pinned_gpu_cache, _pinned_gpu_source
     if _pinned_gpu_cache is not False:
         return _pinned_gpu_cache
     _pinned_gpu_cache = None
-    entries = [e.strip() for e in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
-               if e.strip() and e.strip() != "-1"]
+    entries = _authoritative_gpu_entries()
     if not entries:
         return None
+    _pinned_gpu_source = entries[0]
     table = _gpu_uuid_table()
     first = entries[0]
     uuid_hex = ordinal = None
@@ -308,11 +339,12 @@ def resolve_pinned_gpu() -> tuple[str | None, int | None] | None:
     return _pinned_gpu_cache
 
 
-def apply_gpu_pin(env: dict) -> None:
+def apply_gpu_pin(env: dict, log=print) -> None:
     """Pin wine/DXGI children to the scheduler-pinned GPU.
 
     Precedence: explicit DLSS5_GPU_INDEX (DXGI NVIDIA adapter ordinal, the
-    manual escape hatch) > CUDA_VISIBLE_DEVICES auto-pin > adapter 0.
+    manual escape hatch) > authoritative auto-pin (see _authoritative_gpu_entries)
+    > adapter 0.
     With a resolved UUID we filter at the DXVK layer: DXVK then exposes
     exactly one NVIDIA adapter, so the bridge's ordinal must be 0 and both
     the NR host and the FG worker become order-independent. Without a UUID
@@ -323,12 +355,16 @@ def apply_gpu_pin(env: dict) -> None:
     if explicit:
         try:
             env["DLSS5NR_GPU_INDEX"] = str(int(explicit) or 0)
+            log(f"[RH-DLSS5] gpu pin: manual DLSS5_GPU_INDEX={explicit} "
+                f"(runtime CVD={os.environ.get('CUDA_VISIBLE_DEVICES')!r})")
         except ValueError:
             pass
         return
     pin = resolve_pinned_gpu()
     if pin is None:
         env.setdefault("DLSS5NR_GPU_INDEX", "0")
+        log(f"[RH-DLSS5] gpu pin: no authoritative source resolved; child falls "
+            f"back to DXGI adapter 0 (runtime CVD={os.environ.get('CUDA_VISIBLE_DEVICES')!r})")
         return
     uuid_hex, ordinal = pin
     if uuid_hex:
@@ -336,6 +372,10 @@ def apply_gpu_pin(env: dict) -> None:
         env["DLSS5NR_GPU_INDEX"] = "0"
     elif ordinal is not None:
         env["DLSS5NR_GPU_INDEX"] = str(ordinal)
+    log(f"[RH-DLSS5] gpu pin: source={_pinned_gpu_source!r} -> "
+        f"uuid={uuid_hex!r} ordinal={ordinal} "
+        f"(runtime CVD={os.environ.get('CUDA_VISIBLE_DEVICES')!r}, "
+        f"COMFYUI_CVD={os.environ.get('COMFYUI_CUDA_VISIBLE_DEVICES')!r})")
 
 
 def resolve_snr_filename(runtime: Path, gpu_index: int = 0) -> str:

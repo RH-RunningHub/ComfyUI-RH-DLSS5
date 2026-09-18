@@ -261,3 +261,112 @@ def test_auto_bucket_mode_params_defer_scale(monkeypatch):
     fixed = nodes._build_params({"upscaling_mode": "2x (Performance)", "runtime_dir": "/nonexistent-runtime-for-test"})
     assert fixed["auto_bucket"] is None
     assert fixed["scale"] == 2.0
+
+
+# ---------------------------------------------------------------------------
+# GPU 钉卡权威链 (20260918 星光案: worker 运行期 CVD 可被改写为 '0')
+# ---------------------------------------------------------------------------
+
+def _reset_pin_cache(monkeypatch):
+    common_mod = _pkg.dlss5nr.common
+    monkeypatch.setattr(common_mod, "_pinned_gpu_cache", False)
+    monkeypatch.setattr(common_mod, "_pinned_gpu_source", "")
+
+
+def test_authoritative_gpu_entries_prefers_cli_args(monkeypatch):
+    """cli_args.args.cuda_device 最权威: CVD 被污染为 '0' 也不得采用。"""
+    common_mod = _pkg.dlss5nr.common
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("COMFYUI_CUDA_VISIBLE_DEVICES", "1")
+
+    fake_cli = importlib.import_module("types").ModuleType("comfy.cli_args")
+
+    class _FakeArgs:
+        cuda_device = "1"
+
+    fake_cli.args = _FakeArgs()
+    fake_comfy = importlib.import_module("types").ModuleType("comfy")
+    fake_comfy.cli_args = fake_cli
+    monkeypatch.setitem(sys.modules, "comfy", fake_comfy)
+    monkeypatch.setitem(sys.modules, "comfy.cli_args", fake_cli)
+
+    assert common_mod._authoritative_gpu_entries() == ["1"]
+
+
+def test_authoritative_gpu_entries_falls_back_comfyui_cvd(monkeypatch):
+    """无启动参数时用容器级 COMFYUI_CUDA_VISIBLE_DEVICES。"""
+    common_mod = _pkg.dlss5nr.common
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("COMFYUI_CUDA_VISIBLE_DEVICES", "5")
+    monkeypatch.delitem(sys.modules, "comfy", raising=False)
+    monkeypatch.delitem(sys.modules, "comfy.cli_args", raising=False)
+    assert common_mod._authoritative_gpu_entries() == ["5"]
+
+
+def test_authoritative_gpu_entries_last_resort_cvd(monkeypatch):
+    """两级都缺时退回 CUDA_VISIBLE_DEVICES (旧路径)。"""
+    common_mod = _pkg.dlss5nr.common
+    monkeypatch.delenv("COMFYUI_CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    assert common_mod._authoritative_gpu_entries() == ["3"]
+
+
+def test_resolve_pinned_gpu_ignores_polluted_cvd(monkeypatch):
+    """污染场景: runtime CVD='0'、COMFYUI_CVD='1' -> 解析到 GPU1 的 uuid/序号。"""
+    common_mod = _pkg.dlss5nr.common
+    _reset_pin_cache(monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("COMFYUI_CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.delitem(sys.modules, "comfy", raising=False)
+    monkeypatch.delitem(sys.modules, "comfy.cli_args", raising=False)
+    monkeypatch.setattr(common_mod, "_gpu_uuid_table",
+                        lambda: {0: "gpu0hex", 1: "gpu1hex32chars00", 7: "gpu7hex"})
+
+    uuid_hex, ordinal = common_mod.resolve_pinned_gpu()
+    assert ordinal == 1
+    assert common_mod._pinned_gpu_source == "1"
+    # 进程级缓存生效
+    monkeypatch.setenv("COMFYUI_CUDA_VISIBLE_DEVICES", "7")
+    assert common_mod.resolve_pinned_gpu() == (uuid_hex, ordinal)
+
+
+def test_apply_gpu_pin_diag_and_env(monkeypatch):
+    """apply_gpu_pin: uuid 模式下设置 DXVK_FILTER_DEVICE_UUID, 并打取证日志。"""
+    common_mod = _pkg.dlss5nr.common
+    _reset_pin_cache(monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("COMFYUI_CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.delitem(sys.modules, "comfy", raising=False)
+    monkeypatch.delitem(sys.modules, "comfy.cli_args", raising=False)
+    monkeypatch.setattr(common_mod, "_gpu_uuid_table",
+                        lambda: {1: "gpu1hex32chars00"})
+    env = {}
+    logs = []
+    common_mod.apply_gpu_pin(env, log=logs.append)
+    assert env.get("DXVK_FILTER_DEVICE_UUID") == "gpu1hex32chars00"
+    assert env.get("DLSS5NR_GPU_INDEX") == "0"
+    assert any("gpu pin" in x and "gpu1hex32chars00" in x for x in logs)
+    assert any("CVD='0'" in x for x in logs)   # 污染值入日志取证
+
+
+def test_apply_gpu_pin_manual_escape_hatch(monkeypatch):
+    common_mod = _pkg.dlss5nr.common
+    monkeypatch.setenv("DLSS5_GPU_INDEX", "3")
+    env = {}
+    logs = []
+    common_mod.apply_gpu_pin(env, log=logs.append)
+    assert env.get("DLSS5NR_GPU_INDEX") == "3"
+    assert env.get("DXVK_FILTER_DEVICE_UUID") is None
+    assert any("manual DLSS5_GPU_INDEX=3" in x for x in logs)
+
+
+def test_apply_gpu_pin_no_source_falls_back_adapter0(monkeypatch):
+    common_mod = _pkg.dlss5nr.common
+    _reset_pin_cache(monkeypatch)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("COMFYUI_CUDA_VISIBLE_DEVICES", raising=False)
+    env = {}
+    logs = []
+    common_mod.apply_gpu_pin(env, log=logs.append)
+    assert env.get("DLSS5NR_GPU_INDEX") == "0"
+    assert any("adapter 0" in x for x in logs)
