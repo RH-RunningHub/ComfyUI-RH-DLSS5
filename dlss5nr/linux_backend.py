@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from . import common
-from .common import DLSS5Error
+from .common import DLSS5Error, sanitize_user_text
 
 
 def find_wine() -> str:
@@ -34,7 +34,7 @@ def find_wine() -> str:
         return found
     raise DLSS5Error(
         "Wine was not found on this machine. Install Wine (9.0+ recommended, e.g. "
-        "WineHQ stable) or point DLSS5_WINE at a wine binary."
+        "WineHQ stable) or point the wine-binary environment variable at a wine binary."
     )
 
 
@@ -174,9 +174,10 @@ def resolve_wine_prefix(explicit: str = "", log=print) -> str:
             raise DLSS5Error(f"Could not create wine prefix {candidate}: {exc}") from exc
     if not _prefix_ok(candidate):
         raise DLSS5Error(
-            f"wine prefix {candidate} is not usable for DLSS5: it needs DXVK + DXVK-NVAPI "
-            "(d3d12.dll and nvapi64.dll under drive_c/windows/system32). Point DLSS5_WINEPREFIX "
-            "(or the wine_prefix widget) at a prefix with DXVK + dxvk-nvapi installed.")
+            f"wine prefix {candidate} is not usable: it needs DXVK + DXVK-NVAPI "
+            "(d3d12.dll and nvapi64.dll under drive_c/windows/system32). Point the "
+            "wine_prefix widget (see runtime/README.txt) at a prefix with DXVK + "
+            "dxvk-nvapi installed.")
     return str(candidate)
 
 
@@ -228,6 +229,10 @@ class _StderrDrain(threading.Thread):
     def tail(self, count: int = 12) -> str:
         return "\n".join(list(self.lines)[-count:])
 
+    def sanitized_tail(self, count: int = 12) -> str:
+        """用户可见的错误详情: 去内部代号与路径 (完整原文仍在 worker 日志)。"""
+        return sanitize_user_text(self.tail(count))
+
 
 def _read_exact(stream, count: int) -> bytes:
     chunks = []
@@ -235,7 +240,7 @@ def _read_exact(stream, count: int) -> bytes:
     while remaining > 0:
         chunk = stream.read(remaining)
         if not chunk:
-            raise DLSS5Error("DLSS5 host closed the pipe unexpectedly")
+            raise DLSS5Error("The enhancement host closed the pipe unexpectedly")
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
@@ -248,7 +253,7 @@ class WineHostSession:
                  hdr: bool = False) -> None:
         host = common.PLUGIN_ROOT / "native" / "bin" / "dlss5nr_host.exe"
         if not host.is_file():
-            raise DLSS5Error(f"DLSS5 host executable is missing: {host}")
+            raise DLSS5Error("The enhancement host executable is missing; check the worker deployment")
         self.cmd, self.env = _host_command(host, runtime, gpu_index, wine_prefix, hdr)
         self.cwd = str(common.PLUGIN_ROOT)
         self.runtime = runtime
@@ -266,7 +271,7 @@ class WineHostSession:
                 start_new_session=True,
             )
         except OSError as exc:
-            raise DLSS5Error(f"Could not start the DLSS5 Wine host ({self.cmd[0]}): {exc}") from exc
+            raise DLSS5Error(f"Could not start the wine enhancement host ({self.cmd[0]}): {exc}") from exc
         self.drain = _StderrDrain(self.proc.stderr)
         self.drain.start()
         header = common.HEADER.pack(
@@ -288,11 +293,11 @@ class WineHostSession:
             self.proc.stdin.write(header)
             self.proc.stdin.flush()
         except BrokenPipeError as exc:
-            raise DLSS5Error(f"DLSS5 host exited during handshake:\n{self.drain.tail(20)}") from exc
+            raise DLSS5Error(f"The enhancement host exited during handshake:\n{self.drain.sanitized_tail(20)}") from exc
 
     def _fail(self, message: str) -> DLSS5Error:
-        detail = self.drain.tail(20) if self.drain else ""
-        return DLSS5Error(f"{message}\nDLSS5 host log:\n{detail}")
+        detail = self.drain.sanitized_tail(20) if self.drain else ""
+        return DLSS5Error(f"{message}\nEngine log:\n{detail}")
 
     def send_frame(self, index: int, source: np.ndarray, motion: np.ndarray, reset: bool) -> np.ndarray:
         """Send one RGB float32 frame, return the processed RGB float32 frame."""
@@ -305,22 +310,22 @@ class WineHostSession:
             self.proc.stdin.write(np.ascontiguousarray(motion, dtype=np.float16).view(np.uint16).tobytes(order="C"))
             self.proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
-            raise self._fail(f"DLSS5 pipeline I/O failed on frame {index}: {exc}") from exc
+            raise self._fail(f"Pipeline I/O failed on frame {index}: {exc}") from exc
 
         try:
             magic, reply_index, ok, count = common.REPLY_HEADER.unpack(
                 _read_exact(self.proc.stdout, common.REPLY_HEADER.size))
         except DLSS5Error as exc:
-            raise self._fail(f"Invalid DLSS5 host reply for frame {index}: {exc}") from exc
+            raise self._fail(f"Invalid host reply for frame {index}: {exc}") from exc
         if magic != common.MAGIC_OUT1 or reply_index != index:
-            raise self._fail(f"Invalid DLSS5 host reply for frame {index}: magic={magic!r}, index={reply_index}")
+            raise self._fail(f"Invalid host reply for frame {index}: magic={magic!r}, index={reply_index}")
         if not ok:
             length = int(np.frombuffer(_read_exact(self.proc.stdout, 4), dtype="<u4")[0])
             detail = _read_exact(self.proc.stdout, min(length, 65535)).decode("utf-8", errors="replace")
-            raise self._fail(f"DLSS5 frame {index} failed: {detail}")
+            raise self._fail(f"Frame {index} failed: {detail}")
         expected = output_w * output_h * 3
         if count != expected:
-            raise self._fail(f"DLSS5 frame {index} returned {count} floats, expected {expected}")
+            raise self._fail(f"Frame {index} returned {count} floats, expected {expected}")
         output = np.frombuffer(_read_exact(self.proc.stdout, expected * 4), dtype=np.float32)
         return output.reshape((output_h, output_w, 3))
 
@@ -332,7 +337,7 @@ class WineHostSession:
                 self.proc.stdin = None
             done = _read_exact(self.proc.stdout, 4)
             if done != common.MAGIC_END1:
-                raise self._fail("DLSS5 host did not send END1")
+                raise self._fail("The enhancement host did not send END1")
             # The 310.8 runtime can block in teardown after END1; frames are
             # already delivered, so do not let shutdown hang the queue.
             try:
@@ -341,7 +346,7 @@ class WineHostSession:
                 self.terminate()
                 rc = 0
             if rc != 0:
-                raise self._fail(f"DLSS5 host failed (exit {rc})")
+                raise self._fail(f"The enhancement host failed (exit {rc})")
         except DLSS5Error:
             raise
         finally:

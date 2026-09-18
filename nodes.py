@@ -352,7 +352,7 @@ class RH_DLSS5Enhance:
         image = kwargs.get("image")
         video = kwargs.get("video")
         if image is None and video is None:
-            raise DLSS5Error("RH DLSS5 Enhance needs at least one input: connect `image` or `video`.")
+            raise DLSS5Error("The enhance node needs at least one input: connect `image` or `video`.")
         if str(kwargs.get("style", "default")).startswith("off"):
             return self._bypass_passthrough(image, video, kwargs)
         backend_name = _pick_backend(kwargs.get("backend", "auto"))
@@ -508,7 +508,7 @@ class RH_DLSS5FrameInterpolation:
         image = kwargs.get("image")
         video = kwargs.get("video")
         if image is None and video is None:
-            raise DLSS5Error("RH DLSS5 Frame Interpolation needs at least one input: connect `image` or `video`.")
+            raise DLSS5Error("The frame interpolation node needs at least one input: connect `image` or `video`.")
         choice = str(kwargs.get("output_fps", "2x") or "2x")
         if choice == "1x":
             # 1x passthrough; the real handling is the early-return branch below

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import struct
 from pathlib import Path
@@ -45,6 +46,25 @@ MAX_LONG_EDGE = 7680
 MAX_SHORT_EDGE = 4320
 MAX_PIXELS = 1 << 28
 MAX_FRAMES = 1_000_000
+
+
+_MSG_BRAND_RES = (
+    (re.compile(r"(?i)topaz[a-zA-Z0-9_]*"), "增强引擎"),
+    (re.compile(r"(?i)astra[a-zA-Z0-9]*"), "增强模型"),
+    (re.compile(r"(?i)tvai[a-zA-Z0-9_]*"), "滤镜"),
+    (re.compile(r'(?i)dlss5[a-zA-Z0-9_]*'), "增强"),
+    (re.compile(r"[A-Za-z]:\\[^\s'\"=,]+"), "<引擎路径>"),
+    (re.compile(r"(?<![\w/])/workspace/[^\s'\"=,]+"), "<引擎路径>"),
+    (re.compile(r"/data/ComfyUI[^\s'\"=,]+"), "<数据路径>"),
+)
+
+
+def sanitize_user_text(text):
+    """清掉用户可见报错里的内部代号与路径 (worker 日志保持全量供排障)。"""
+    out = str(text)
+    for pat, repl in _MSG_BRAND_RES:
+        out = pat.sub(repl, out)
+    return re.sub(r" {2,}", " ", out)
 
 
 class DLSS5Error(RuntimeError):
@@ -158,7 +178,7 @@ def auto_scale_factor(width: int, height: int, bucket: str) -> float:
         return factor
     if envelope_failed:
         raise DLSS5Error(
-            f"Auto {bucket} from {width}x{height} would exceed the DLSSNR output "
+            f"Auto {bucket} from {width}x{height} would exceed the neural rendering output "
             f"envelope ({MAX_LONG_EDGE}x{MAX_SHORT_EDGE}) at the smallest factor that "
             f"reaches the {bucket_short}-pixel short edge")
     raise DLSS5Error(
@@ -177,7 +197,7 @@ def target_size(width: int, height: int, scale_factor: float) -> tuple[int, int]
     closest = min(SCALE_TO_PERF_QUALITY, key=lambda candidate: abs(candidate - ratio))
     if abs(closest - ratio) > 0.03:
         supported = ", ".join(f"{candidate:g}x" for candidate in SCALE_TO_PERF_QUALITY)
-        raise DLSS5Error(f"Unsupported DLSSNR scale factor {ratio:.3f}; choose one of {supported}")
+        raise DLSS5Error(f"Unsupported scale factor {ratio:.3f}; choose one of {supported}")
     return out_w, out_h
 
 
@@ -185,7 +205,7 @@ def perf_quality_for(output_w: int, output_h: int, source_w: int, source_h: int)
     ratio = ((output_w / source_w) + (output_h / source_h)) * 0.5
     closest = min(SCALE_TO_PERF_QUALITY, key=lambda candidate: abs(candidate - ratio))
     if abs(closest - ratio) > 0.03:
-        raise DLSS5Error(f"Unsupported DLSSNR scale factor {ratio:.3f}")
+        raise DLSS5Error(f"Unsupported scale factor {ratio:.3f}")
     return SCALE_TO_PERF_QUALITY[closest]
 
 
@@ -195,9 +215,9 @@ def validate_sizes(input_w: int, input_h: int, output_w: int, output_h: int) -> 
         if not 0 < value <= MAX_DIM:
             raise DLSS5Error(f"{name} {value} is outside the supported 1..{MAX_DIM} range")
     if max(output_w, output_h) > MAX_LONG_EDGE or min(output_w, output_h) > MAX_SHORT_EDGE:
-        raise DLSS5Error(f"Output {output_w}x{output_h} exceeds the DLSSNR {MAX_LONG_EDGE}x{MAX_SHORT_EDGE} envelope")
+        raise DLSS5Error(f"Output {output_w}x{output_h} exceeds the {MAX_LONG_EDGE}x{MAX_SHORT_EDGE} output envelope")
     if input_w * input_h > MAX_PIXELS or output_w * output_h > MAX_PIXELS:
-        raise DLSS5Error("Frame stream is too large for a single DLSS5 session (max 2^28 pixels per surface)")
+        raise DLSS5Error("Frame stream is too large for a single enhancement session (max 2^28 pixels per surface)")
 
 
 def _comfy_models_dir() -> Path:
@@ -447,10 +467,10 @@ def resolve_runtime_dir(runtime_dir: str = "") -> Path:
             return candidate
     listed = ", ".join(str(c) for c in candidates)
     raise DLSS5Error(
-        "No DLSS5 runtime was found (looked for nvngx_dlssnr.dll in: "
-        f"{listed}). Place your legally obtained nvngx_dlssnr.dll in models/dlss5 "
-        "(recommended, survives custom_nodes updates) or one of the other listed "
-        "folders. See runtime/README.txt."
+        "No neural-rendering runtime was found (looked for nvngx_dlssnr.dll in: "
+        f"{listed}). Place your legally obtained nvngx_dlssnr.dll in the models "
+        "folder (recommended, survives custom_nodes updates) or one of the other "
+        "listed folders. See runtime/README.txt for the exact location."
     )
 
 
@@ -464,12 +484,12 @@ def check_runtime_files(runtime: Path, scale_factor: float) -> None:
     if not (runtime / "caller" / "nvngx.dll_comfy.dll").is_file() and not (runtime / "caller" / "nvngx.dll").is_file():
         missing.append(f"{runtime / 'caller' / 'nvngx.dll_comfy.dll'} (project caller shim)")
     if missing:
-        raise DLSS5Error("The DLSS5 runtime in "
-                         f"{runtime} is incomplete. Missing: " + "; ".join(missing))
+        raise DLSS5Error("The neural-rendering runtime is incomplete. Missing: "
+                         + "; ".join(sanitize_user_text(m) for m in missing))
 
 
 def style_int(style: str) -> int:
     try:
         return STYLE_VALUES[str(style).strip().lower()]
     except KeyError:
-        raise DLSS5Error(f"Unknown DLSS5 style: {style!r}; expected one of {sorted(STYLE_VALUES)}")
+        raise DLSS5Error(f"Unknown style: {style!r}; expected one of {sorted(STYLE_VALUES)}")

@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .common import DLSS5Error, apply_gpu_pin
+from .common import DLSS5Error, apply_gpu_pin, sanitize_user_text
 from .linux_backend import _start_xvfb_if_needed, find_wine, resolve_wine_prefix
 
 SETUP_MAGIC = 0x31534746
@@ -126,9 +126,10 @@ def find_fg_runtime(override: str = "") -> Path:
             return candidate
     listed = ", ".join(str(c) for c in candidates)
     raise DLSS5Error(
-        "DLSS frame generation runtime is missing. Place dlssg-worker.exe, nvngx.dll, "
-        f"_nvngx.dll and nvngx_dlssg.dll in one of: {listed} (or set DLSS5_FG_RUNTIME_DIR). "
-        "The worker binary and NVIDIA DLLs are user-supplied and never redistributed."
+        "Frame generation runtime is missing. Place dlssg-worker.exe, nvngx.dll, "
+        "_nvngx.dll and nvngx_dlssg.dll in the runtime folder (see runtime/README.txt "
+        "for the exact location). The worker binary and NVIDIA DLLs are user-supplied "
+        "and never redistributed."
     )
 
 
@@ -158,7 +159,7 @@ def probe_fg_capabilities(runtime: Path) -> dict:
         raise DLSS5Error("DLSS frame generation capability probe timed out.")
     if proc.returncode:
         detail = (stderr or stdout).strip() or f"exit code {proc.returncode}"
-        raise DLSS5Error(f"DLSS frame generation probe failed:\n{detail[-2000:]}")
+        raise DLSS5Error(f"Frame generation probe failed:\n{sanitize_user_text(detail[-2000:])}")
     lines = [line for line in stdout.splitlines() if line.strip()]
     if not lines:
         raise DLSS5Error("DLSS frame generation probe returned no result.")
