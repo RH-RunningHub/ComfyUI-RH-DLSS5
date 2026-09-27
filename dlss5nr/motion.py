@@ -90,4 +90,8 @@ class TemporalGuideGenerator:
 
 def sample_u8(image_tensor: np.ndarray) -> np.ndarray:
     """float RGB [H,W,C] in 0..1 -> uint8 RGB for the guide generator."""
+    if image_tensor.ndim == 3 and image_tensor.shape[-1] > 3:
+        # RGBA input: every consumer (backend upload protocol, motion paths)
+        # expects exactly 3 channels; alpha must not ride along (GH issue #5).
+        image_tensor = image_tensor[..., :3]
     return np.clip(image_tensor * 255.0 + 0.5, 0, 255).astype(np.uint8)

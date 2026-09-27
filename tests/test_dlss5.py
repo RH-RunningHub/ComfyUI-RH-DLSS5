@@ -41,6 +41,13 @@ import importlib  # noqa: E402
 
 fg = importlib.import_module(_PKG_NAME + ".dlss5nr.fg")  # noqa: E402
 decoder = importlib.import_module(_PKG_NAME + ".dlss5nr.decoder")  # noqa: E402
+nodes = importlib.import_module(_PKG_NAME + ".nodes")  # noqa: E402
+motion = importlib.import_module(_PKG_NAME + ".dlss5nr.motion")  # noqa: E402
+
+try:
+    import torch  # noqa: E402
+except ImportError:  # pragma: no cover
+    torch = None
 
 NEED_FFMPEG = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -370,3 +377,62 @@ def test_apply_gpu_pin_no_source_falls_back_adapter0(monkeypatch):
     common_mod.apply_gpu_pin(env, log=logs.append)
     assert env.get("DLSS5NR_GPU_INDEX") == "0"
     assert any("adapter 0" in x for x in logs)
+
+
+# ---------------------------------------------------------------------------
+# RGBA 输入回归 (GH issue #5): RGBA IMAGE 走 Enhance 时 auto 通道探测广播
+# 崩溃、强制通道序时 4 通道帧污染后端上传协议
+# ---------------------------------------------------------------------------
+def test_sample_u8_truncates_rgba_to_rgb():
+    """RGBA float 帧进 sample_u8 必须出 3 通道 uint8, 数值与 RGB 截断一致。"""
+    rng = np.random.default_rng(7)
+    rgb = rng.random((32, 24, 3)).astype(np.float32)
+    alpha = rng.random((32, 24, 1)).astype(np.float32)
+    rgba = np.concatenate([rgb, alpha], axis=-1)
+    out = motion.sample_u8(rgba)
+    assert out.dtype == np.uint8 and out.shape == (32, 24, 3)
+    np.testing.assert_array_equal(out, motion.sample_u8(rgb))
+
+
+def test_channel_choice_accepts_rgba_reference():
+    """auto 探测: RGBA reference 不再广播崩溃, 判定结果与 RGB reference 一致。"""
+    rng = np.random.default_rng(11)
+    h, w = 64, 48
+    rgb = rng.random((h, w, 3)).astype(np.float32)
+    ref = rgb.copy()
+    ref_rgba = np.concatenate([ref, np.ones((h, w, 1), dtype=np.float32)], axis=-1)
+    frame_out, order_rgb = nodes._channel_choice(rgb.copy(), ref, "auto")
+    frame_out_rgba, order_rgba = nodes._channel_choice(rgb.copy(), ref_rgba, "auto")
+    assert order_rgb == order_rgba
+    np.testing.assert_array_equal(frame_out, frame_out_rgba)
+
+
+def test_channel_choice_forced_orders_unchanged():
+    """强制通道序语义不变: RGBA 直通 / BGRA 翻转。"""
+    rng = np.random.default_rng(13)
+    frame = rng.random((16, 16, 3)).astype(np.float32)
+    ref = rng.random((16, 16, 3)).astype(np.float32)
+    out_rgba, order_rgba = nodes._channel_choice(frame, ref, "RGBA")
+    np.testing.assert_array_equal(out_rgba, frame)
+    assert order_rgba == "RGBA"
+    out_bgra, order_bgra = nodes._channel_choice(frame, ref, "BGRA")
+    np.testing.assert_array_equal(out_bgra, frame[..., ::-1])
+    assert order_bgra == "BGRA"
+
+
+def test_frame_source_yields_rgb_for_rgba_batch(monkeypatch):
+    """4 通道 IMAGE 张量走 _frame_source: 每帧 3 通道, 运动引擎选择不被 4ch 破坏。"""
+    rng = np.random.default_rng(17)
+    batch = rng.random((3, 32, 24, 4)).astype(np.float32)  # (T,H,W,4) RGBA
+    params = {"batch_temporal": False, "motion_mode": "none",
+              "scene_change_threshold": 0.24}
+    frames = list(nodes._frame_source(torch.from_numpy(batch), params))
+    assert len(frames) == 3
+    for pixels_u8, motion_fp16, reset in frames:
+        assert pixels_u8.dtype == np.uint8 and pixels_u8.shape == (32, 24, 3)
+        assert motion_fp16.shape == (32, 24, 2)
+        assert reset is True
+    # 运动路径能整批处理 (DIS 引擎在 3ch 下不再报通道数错)
+    params_seq = dict(params, motion_mode="auto")
+    for pixels_u8, _m, _r in nodes._frame_source(torch.from_numpy(batch), params_seq):
+        assert pixels_u8.shape[-1] == 3

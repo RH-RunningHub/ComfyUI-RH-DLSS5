@@ -62,6 +62,10 @@ def _channel_choice(frame: np.ndarray, reference: np.ndarray, order: str) -> tup
         return frame, "RGBA"
     if order == "BGRA":
         return frame[..., ::-1], "BGRA"
+    if reference.ndim == 3 and reference.shape[-1] > 3:
+        # RGBA input: the NR output is always 3-channel, so the alpha channel
+        # would fail the broadcast below (GH issue #5).
+        reference = reference[..., :3]
     sample_h = min(128, frame.shape[0], reference.shape[0])
     sample_w = min(128, frame.shape[1], reference.shape[1])
     iy = np.linspace(0, frame.shape[0] - 1, sample_h, dtype=np.int64)
